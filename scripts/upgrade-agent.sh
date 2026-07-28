@@ -18,7 +18,7 @@
 #
 set -euo pipefail
 
-REPO="iluobei/mmw-agent"
+REPO="violetaini/relaydock-agent"
 BIN="/usr/local/bin/mmw-agent"
 TARGET="${1:-latest}"
 
@@ -27,6 +27,32 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 # 必须 root(写 /usr/local/bin + 控制服务)
 [ "$(id -u)" = 0 ] || err "请用 root 运行"
+
+# 只接受稳定 X.Y.Z 版本。无法确认当前或目标版本时必须拒绝，避免把可用
+# agent 替换成较旧版本。
+is_stable_version() {
+    local candidate="${1#v}"
+    case "$candidate" in
+        ""|*[^0-9.]*|.*|*.|*..*) return 1 ;;
+    esac
+    local part1 part2 part3 extra
+    IFS='.' read -r part1 part2 part3 extra <<< "$candidate"
+    [ -n "$part1" ] && [ -n "$part2" ] && [ -n "$part3" ] && [ -z "${extra:-}" ]
+}
+
+# 输出 -1/0/1，分别表示第一个版本小于/等于/大于第二个版本。
+compare_stable_versions() {
+    local left1 left2 left3 left_extra right1 right2 right3 right_extra
+    IFS='.' read -r left1 left2 left3 left_extra <<< "${1#v}"
+    IFS='.' read -r right1 right2 right3 right_extra <<< "${2#v}"
+    if (( 10#$left1 < 10#$right1 )); then echo -1; return; fi
+    if (( 10#$left1 > 10#$right1 )); then echo 1; return; fi
+    if (( 10#$left2 < 10#$right2 )); then echo -1; return; fi
+    if (( 10#$left2 > 10#$right2 )); then echo 1; return; fi
+    if (( 10#$left3 < 10#$right3 )); then echo -1; return; fi
+    if (( 10#$left3 > 10#$right3 )); then echo 1; return; fi
+    echo 0
+}
 
 # 1. 探测架构
 ARCH=$(uname -m)
@@ -37,18 +63,45 @@ case $ARCH in
 esac
 log "架构: $ARCH_NAME"
 
-# 2. 解析目标版本 path(URL 前缀由镜像链各自接上)
+# 2. 读取当前版本。新版 agent 提供隐藏 __version 子命令；旧版本无法确认时
+# fail closed，避免手动脚本成为绕过面板升级保护的入口。
+CURRENT_VERSION="$($BIN __version 2>/dev/null || true)"
+CURRENT_VERSION="${CURRENT_VERSION#v}"
+is_stable_version "$CURRENT_VERSION" || err "无法读取当前 Agent 的稳定版本；为防止降级，拒绝自动替换"
+log "当前版本: v$CURRENT_VERSION"
+
+TMP="$(mktemp /tmp/mmw-agent-new.XXXXXX)"
+RELEASE_JSON="$(mktemp /tmp/mmw-agent-release.XXXXXX)"
+trap 'rm -f "$TMP" "$TMP.sig" "$RELEASE_JSON"' EXIT
+
+# 3. 解析目标版本 path(URL 前缀由镜像链各自接上)。latest 先解析为固定 tag，
+# 这样下载时不会因 GitHub latest 指向变化而绕过版本比较。
 if [ "$TARGET" = "latest" ]; then
-    PATH_SUFFIX="releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
-    log "目标: GitHub latest"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 10 --max-time 60 -o "$RELEASE_JSON" "https://api.github.com/repos/${REPO}/releases/latest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --connect-timeout=10 --read-timeout=60 -O "$RELEASE_JSON" "https://api.github.com/repos/${REPO}/releases/latest"
+    else
+        err "没有 curl/wget,无法读取 GitHub 最新版本"
+    fi
+    TAG="$(sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RELEASE_JSON" | head -n 1)"
+    [ -n "$TAG" ] || err "无法解析 GitHub 最新 release tag"
+    log "目标: GitHub latest ($TAG)"
 else
     # 允许带或不带 v 前缀
     case "$TARGET" in v*) TAG="$TARGET" ;; *) TAG="v$TARGET" ;; esac
-    PATH_SUFFIX="releases/download/${TAG}/mmw-agent-linux-${ARCH_NAME}"
     log "目标: $TAG"
 fi
 
-# 3. 下载到临时位置(--max-time 防止网络卡死无限等)
+TARGET_VERSION="${TAG#v}"
+is_stable_version "$TARGET_VERSION" || err "目标版本不是稳定 X.Y.Z release: $TAG"
+comparison="$(compare_stable_versions "$TARGET_VERSION" "$CURRENT_VERSION")"
+if (( comparison <= 0 )); then
+    err "拒绝降级: 目标 v$TARGET_VERSION 不高于当前 v$CURRENT_VERSION"
+fi
+PATH_SUFFIX="releases/download/v${TARGET_VERSION}/mmw-agent-linux-${ARCH_NAME}"
+
+# 4. 下载到临时位置(--max-time 防止网络卡死无限等)
 # 镜像链 — GitHub 优先,失败再自动降级到 CDN 代理。纯 v6 机器直连 github 会"network is unreachable"
 # (release binary 重定向到无 AAAA 的 objects.githubusercontent.com),会快速失败后降级到
 # ghproxy/gh-proxy(v4+v6 双栈反代)。
@@ -57,8 +110,6 @@ MIRRORS=(
     "https://gh-proxy.com/https://github.com/${REPO}/${PATH_SUFFIX}"
     "https://mirror.ghproxy.com/https://github.com/${REPO}/${PATH_SUFFIX}"
 )
-TMP="$(mktemp /tmp/mmw-agent-new.XXXXXX)"
-trap 'rm -f "$TMP" "$TMP.sig"' EXIT
 download_ok=0
 for URL in "${MIRRORS[@]}"; do
     log "下载 $URL ..."
@@ -80,10 +131,9 @@ SIZE=$(du -h "$TMP" | cut -f1)
 NEW_MD5=$(md5sum "$TMP" | awk '{print $1}')
 log "下载完成: $SIZE, md5=$NEW_MD5"
 
-# 3b. 签名校验:下载同名 .sig,用【已装】agent 的内嵌公钥验签(私钥离线,主控/本仓库都没有)。
-#     - rc=0  通过 → 继续
-#     - rc=1  新版 agent 明确判定签名不匹配 → 中止(防被篡改/MITM 的二进制)
-#     - 其它  当前是旧版 agent(不支持 __verify-update)或拿不到 .sig → 警告后继续(过渡期兼容)
+# 4b. 签名校验:下载同名 .sig,用【已装】agent 的内嵌公钥验签(私钥离线,主控/本仓库都没有)。
+# 当前版本已通过 __version 门槛,也必须支持 __verify-update；任何缺失、超时或
+# 校验错误都 fail closed，不能让手动脚本绕过面板升级入口的签名要求。
 SIG="$TMP.sig"
 sig_ok=0
 for URL in "${MIRRORS[@]}"; do
@@ -98,18 +148,13 @@ if [ "$sig_ok" = 1 ] && [ -x "$BIN" ] && command -v timeout >/dev/null 2>&1; the
     set +e
     VOUT=$(timeout 15 "$BIN" __verify-update "$TMP" "$SIG" 2>&1); VRC=$?
     set -e
-    if [ "$VRC" = 0 ]; then
-        log "✅ 签名校验通过"
-    elif [ "$VRC" = 1 ]; then
-        err "签名校验失败(二进制与签名不匹配,拒绝升级): $VOUT"
-    else
-        log "[WARN] 无法验签(rc=$VRC,可能当前为旧版 agent 不支持),按原流程继续"
-    fi
+    [ "$VRC" = 0 ] || err "签名校验失败或无法完成(rc=$VRC,拒绝升级): $VOUT"
+    log "✅ 签名校验通过"
 else
-    log "[WARN] 未获取到 .sig 或环境不支持,跳过验签"
+    err "未获取到签名、当前 Agent 不可执行或系统缺少 timeout，拒绝升级"
 fi
 
-# 4. 与现有 binary 对比;一样就不动
+# 5. 与现有 binary 对比;一样就不动
 if [ -f "$BIN" ]; then
     OLD_MD5=$(md5sum "$BIN" | awk '{print $1}')
     if [ "$OLD_MD5" = "$NEW_MD5" ]; then
@@ -121,13 +166,14 @@ if [ -f "$BIN" ]; then
     log "已备份: $BAK (md5=$OLD_MD5)"
 fi
 
-# 5. 原子替换(避免 "text file busy" — 旧进程占着 inode 不能直接 cp 覆盖)
+# 6. 原子替换(避免 "text file busy" — 旧进程占着 inode 不能直接 cp 覆盖)
 chmod +x "$TMP"
 mv -f "$TMP" "$BIN"
+rm -f "$SIG" "$RELEASE_JSON"
 trap - EXIT
 log "已替换 $BIN"
 
-# 6. 重启服务 — 顺序探测,谁活跃用谁
+# 7. 重启服务 — 顺序探测,谁活跃用谁
 restarted=0
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
    && systemctl list-unit-files mmw-agent.service >/dev/null 2>&1; then
@@ -147,7 +193,7 @@ else
     log "[WARN] 未检测到 mmw-agent 进程或服务,二进制已替换但需要手动启动"
 fi
 
-# 7. 验证
+# 8. 验证
 sleep 3
 if [ $restarted -eq 1 ]; then
     if pgrep -f "/usr/local/bin/mmw-agent" >/dev/null 2>&1; then

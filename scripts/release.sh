@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-REPO="iluobei/mmw-agent"
+REPO="violetaini/relaydock-agent"
 
 # 必须在 main 分支、工作区干净
 BRANCH=$(git rev-parse --abbrev-ref HEAD)

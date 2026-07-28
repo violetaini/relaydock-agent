@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   mmw-agent:
-    image: ghcr.io/iluobei/mmw-agent:latest
+    image: ghcr.io/violetaini/relaydock-agent:latest
     container_name: mmw-agent
     restart: unless-stopped
 

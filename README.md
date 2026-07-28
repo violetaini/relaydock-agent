@@ -20,7 +20,7 @@ docker run -d \
   -v $(pwd)/xray-config:/usr/local/etc/xray \
   -v $(pwd)/nginx-cert:/etc/nginx/cert \
   -v $(pwd)/nginx-servers:/etc/nginx/servers \
-  ghcr.io/iluobei/mmw-agent:latest
+  ghcr.io/violetaini/relaydock-agent:latest
 ```
 
 或用 [docker-compose.yml](docker-compose.yml):
@@ -40,7 +40,7 @@ docker compose up -d
 
 ```bash
 # 主控 UI 给的安装命令,大致形如:
-curl -sL https://raw.githubusercontent.com/iluobei/mmw-agent/main/install.sh | bash -s -- \
+curl -sL https://raw.githubusercontent.com/violetaini/relaydock-agent/main/install.sh | bash -s -- \
     --master https://master.example.com --token xxxxx
 ```
 

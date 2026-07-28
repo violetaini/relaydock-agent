@@ -11,6 +11,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -96,6 +97,15 @@ func (h *WarpHandler) HandleLicense(w http.ResponseWriter, r *http.Request) {
 	// peer 可能变了,重建 outbound
 	if err := h.applyOutbounds(ctx); err != nil {
 		log.Printf("[WARP] license updated but apply outbounds failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success":           false,
+			"partial":           true,
+			"license_updated":   true,
+			"outbounds_applied": false,
+			"status":            h.statusResponse(st),
+			"error":             fmt.Sprintf("WARP license updated, but applying outbounds failed: %v", err),
+		})
+		return
 	}
 	writeJSON(w, http.StatusOK, h.statusResponse(st))
 }
@@ -110,15 +120,33 @@ func (h *WarpHandler) HandleRemove(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 先尝试从 xray 删 outbound(失败也继续往下,确保 Cloudflare 端注销 + 本地清状态)
-	if err := h.removeOutboundTags(ctx, "warp-v4", "warp-v6"); err != nil {
-		log.Printf("[WARP] remove outbounds returned: %v", err)
-	}
-	if err := h.service.Uninstall(ctx); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("WARP uninstall failed: %v", err))
+	// Keep warp.json as the retry marker until both runtime/persisted outbounds
+	// and the Cloudflare device have been removed. Otherwise a partial outbound
+	// failure followed by a successful Cloudflare delete becomes unrecoverable.
+	outboundResult, removalErr := removeWarpInRetryableOrder(
+		func() (warpOutboundRemovalResult, error) {
+			return h.removeOutboundTags(ctx, "warp-v4", "warp-v6")
+		},
+		func() error {
+			return h.service.Uninstall(ctx)
+		},
+	)
+	if removalErr != nil {
+		log.Printf("[WARP] removal incomplete; retry state retained: %v", removalErr)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success":     false,
+			"partial":     true,
+			"uninstalled": h.service.State() == nil,
+			"outbounds":   outboundResult,
+			"error":       fmt.Sprintf("WARP removal incomplete; retry required: %v", removalErr),
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"uninstalled": true,
+		"outbounds":   outboundResult,
+	})
 }
 
 // --- 内部 helpers ---
@@ -148,58 +176,124 @@ func (h *WarpHandler) applyOutbounds(ctx context.Context) error {
 			return fmt.Errorf("add outbound %s: %w", tag, err)
 		}
 		if err := h.manage.persistOutbound(ob); err != nil {
-			log.Printf("[WARP] persist %s to config failed: %v", tag, err)
+			return fmt.Errorf("persist outbound %s to config: %w", tag, err)
 		}
 	}
 	return nil
 }
 
+type warpOutboundRemovalResult struct {
+	RuntimeAttempted bool `json:"runtime_attempted"`
+	RuntimeRemoved   bool `json:"runtime_removed"`
+	ConfigAttempted  bool `json:"config_attempted"`
+	ConfigRemoved    bool `json:"config_removed"`
+}
+
+func removeWarpInRetryableOrder(
+	removeOutbounds func() (warpOutboundRemovalResult, error),
+	uninstall func() error,
+) (warpOutboundRemovalResult, error) {
+	result, err := removeOutbounds()
+	if err != nil {
+		return result, fmt.Errorf("remove WARP outbounds: %w", err)
+	}
+	if err := uninstall(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// removeWarpOutboundTags 把运行时和配置文件删除当作两条独立路径，一条失败不会阻断另一条。
+// callback 为 nil 表示该路径无法尝试，具体的 setup 错误由 caller 合并返回。
+func removeWarpOutboundTags(tags []string, runtimeRemove, configRemove func(string) error) (warpOutboundRemovalResult, error) {
+	result := warpOutboundRemovalResult{
+		RuntimeAttempted: runtimeRemove != nil,
+		RuntimeRemoved:   runtimeRemove != nil,
+		ConfigAttempted:  configRemove != nil,
+		ConfigRemoved:    configRemove != nil,
+	}
+	var failures []error
+	for _, tag := range tags {
+		if runtimeRemove != nil {
+			if err := runtimeRemove(tag); err != nil {
+				result.RuntimeRemoved = false
+				failures = append(failures, fmt.Errorf("remove runtime outbound %s: %w", tag, err))
+			}
+		}
+		if configRemove != nil {
+			if err := configRemove(tag); err != nil {
+				result.ConfigRemoved = false
+				failures = append(failures, fmt.Errorf("remove config outbound %s: %w", tag, err))
+			}
+		}
+	}
+	return result, errors.Join(failures...)
+}
+
 // removeOutboundTags 从 xray runtime 和 config 文件里删除指定 tags 的 outbound。
-func (h *WarpHandler) removeOutboundTags(ctx context.Context, tags ...string) error {
+func (h *WarpHandler) removeOutboundTags(ctx context.Context, tags ...string) (warpOutboundRemovalResult, error) {
+	var (
+		clients       *xrpc.Clients
+		runtimeRemove func(string) error
+		setupErr      error
+	)
 	apiPort := h.manage.findXrayAPIPort()
 	if apiPort == 0 {
-		return fmt.Errorf("xray API not available")
-	}
-	clients, err := xrpc.New(ctx, constants.LocalhostIP, uint16(apiPort))
-	if err != nil {
-		return fmt.Errorf("connect xray gRPC: %w", err)
-	}
-	defer clients.Connection.Close()
-	for _, tag := range tags {
-		if err := h.manage.removeOutbound(ctx, clients.Handler, tag); err != nil {
-			log.Printf("[WARP] xray runtime remove %s: %v", tag, err)
+		setupErr = fmt.Errorf("xray runtime removal unavailable: xray API not available")
+	} else {
+		var err error
+		clients, err = xrpc.New(ctx, constants.LocalhostIP, uint16(apiPort))
+		if err != nil {
+			setupErr = fmt.Errorf("xray runtime removal unavailable: connect xray gRPC: %w", err)
+		} else {
+			defer clients.Connection.Close()
+			runtimeRemove = func(tag string) error {
+				err := h.manage.removeOutbound(ctx, clients.Handler, tag)
+				if err != nil && isMissingInboundError(err) {
+					return nil
+				}
+				return err
+			}
 		}
-		if err := h.manage.removeOutboundFromConfig(tag); err != nil {
-			log.Printf("[WARP] config remove %s: %v", tag, err)
-		}
 	}
-	return nil
+	result, removeErr := removeWarpOutboundTags(tags, runtimeRemove, h.manage.removeOutboundFromConfig)
+	if setupErr != nil {
+		result.RuntimeAttempted = false
+		result.RuntimeRemoved = false
+	}
+	return result, errors.Join(setupErr, removeErr)
 }
 
 // statusResponse 把 State 转成给 master 看的状态 dto。state 为 nil 时返回 installed=false。
 func (h *WarpHandler) statusResponse(st *warp.State) map[string]any {
 	if st == nil || st.DeviceID == "" {
-		return map[string]any{"installed": false}
+		return map[string]any{"success": true, "installed": false}
 	}
 	return map[string]any{
-		"installed":     true,
+		"success":        true,
+		"installed":      true,
 		"license_active": st.LicenseKey != "",
-		"device_id":     st.DeviceID,
-		"addr_v4":       st.AddrV4,
-		"addr_v6":       st.AddrV6,
-		"registered_at": st.RegisteredAt,
+		"device_id":      st.DeviceID,
+		"addr_v4":        st.AddrV4,
+		"addr_v6":        st.AddrV6,
+		"registered_at":  st.RegisteredAt,
 	}
 }
 
 func (h *WarpHandler) auth(r *http.Request) bool {
-	// 跟 ManageHandler.authenticate 同款:Bearer token + ws_rpc 来源跳过(crypto_middleware 已校 master 身份)
-	token := r.Header.Get("Authorization")
-	if rpc := r.Header.Get("X-WS-RPC"); rpc == "1" {
+	// WS RPC requests are built in memory by the authenticated dispatcher. An
+	// external caller can forge the header, so the synthetic RemoteAddr marker
+	// is required as well.
+	if r.Header.Get("X-WS-RPC") == "1" && r.RemoteAddr == "ws-rpc" {
 		return true
 	}
-	if h.configToken == "" {
+	if r.Header.Get(constants.HeaderUserAgent) != constants.AgentUserAgent {
 		return false
 	}
+	if h.configToken == "" {
+		return true
+	}
+	token := r.Header.Get(constants.HeaderAuthorization)
 	const prefix = "Bearer "
 	if len(token) > len(prefix) && token[:len(prefix)] == prefix {
 		return token[len(prefix):] == h.configToken

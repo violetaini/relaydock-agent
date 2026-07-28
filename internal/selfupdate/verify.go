@@ -19,7 +19,7 @@ import (
 // 留空 → VerifyFile 一律失败 → 自更新被拒(fail-safe,不接受未签名二进制)。
 //
 // 也可在编译期用 -ldflags "-X 'mmw-agent/internal/selfupdate.PubKeyB64=<base64>'" 覆盖。
-var PubKeyB64 = "3aGta5gVWH1jVUInTJopAT7xB8soc4A8FgGEgHrVq6k=" // 升级验签公钥(公开,可提交);对应私钥离线保管
+var PubKeyB64 = "gmSNFWvQYcQ/VXpjO0D43uZJJFfW0puZvEpNcwvFhzA=" // 升级验签公钥(公开,可提交);对应私钥仅存于 GitHub Actions Secret
 
 // VerifyFile 用内嵌公钥校验 binPath 的 Ed25519 分离签名(sigPath 为原始 64 字节签名)。
 func VerifyFile(binPath, sigPath string) error {

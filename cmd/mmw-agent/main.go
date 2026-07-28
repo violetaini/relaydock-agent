@@ -26,14 +26,17 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"mmw-agent/internal/agent"
+	"mmw-agent/internal/agentfirewall"
 	"mmw-agent/internal/config"
 	"mmw-agent/internal/constants"
 	"mmw-agent/internal/discovery"
 	"mmw-agent/internal/embedded"
 	"mmw-agent/internal/handler"
+	"mmw-agent/internal/linespeed"
 	"mmw-agent/internal/securechan"
 	"mmw-agent/internal/selfupdate"
 	"mmw-agent/internal/util"
+	"mmw-agent/internal/version"
 	"mmw-agent/internal/warp"
 )
 
@@ -195,6 +198,12 @@ func enforceMaxLogFiles(dir, prefix string, keep int) {
 }
 
 func main() {
+	// 隐藏子命令:供受支持的本地升级脚本读取当前版本,在替换前拒绝降级。
+	if len(os.Args) == 2 && os.Args[1] == "__version" {
+		fmt.Println(version.Version)
+		return
+	}
+
 	// 隐藏子命令:校验升级二进制签名,供升级脚本在替换前调用(用内嵌公钥验签)。
 	// 必须在 flag.Parse 之前拦截。
 	if len(os.Args) >= 2 && os.Args[1] == "__verify-update" {
@@ -211,7 +220,19 @@ func main() {
 
 	configPath := flag.String("config", "", "Path to config file")
 	configPathShort := flag.String("c", "", "Path to config file (shorthand)")
+	firewallRulesPath := flag.String("arcway-firewall-rules", "", "Print public Xray inbound firewall rules and exit")
 	flag.Parse()
+	if *firewallRulesPath != "" {
+		rules, err := agentfirewall.RulesFromFile(*firewallRulesPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "derive Xray inbound firewall rules: %v\n", err)
+			os.Exit(1)
+		}
+		for _, rule := range rules {
+			fmt.Printf("%s %d\n", rule.Protocol, rule.Port)
+		}
+		return
+	}
 
 	// 仅在 -config 未设置时使用 -c
 	cfgFile := *configPath
@@ -270,8 +291,10 @@ func main() {
 	manageHandler := handler.NewManageHandler(cfg.Token, cfg.RestartMethod, cfg.RestartCommand)
 	manageHandler.SetConfigPath(cfgFile)
 	manageHandler.SetLogPath(cfg.LogPath) // 供「Agent 日志」页读取 agent 自身日志文件
+	manageHandler.SetMasterURL(cfg.MasterURL)
 	manageHandler.SetXrayMode(cfg.XrayMode)
 	manageHandler.SetXrayAccessLogPath(xrayAccessLog) // 内嵌模式 service=xray 读它
+	manageHandler.SetNginxMode(cfg.NginxMode)
 
 	// WARP 服务 — 状态文件 warp.json 跟 config.yaml 同目录(空 cfgFile 时用当前工作目录)
 	warpWorkDir := "."
@@ -280,6 +303,8 @@ func main() {
 	}
 	warpService := warp.NewService(warpWorkDir)
 	warpHandler := handler.NewWarpHandler(cfg.Token, warpService, manageHandler)
+	lineSpeedService := linespeed.New(warpWorkDir)
+	lineSpeedHandler := handler.NewLineSpeedHandler(manageHandler, lineSpeedService)
 
 	// geoip.dat / geosite.dat 不分 mode 都要准备好 — 主控的 xray test-config 在 external mode
 	// 下若 LookPath("xray") 失败(典型: xray 还在 install 流程中)会 fallback 走 xray-core 库
@@ -397,11 +422,13 @@ func main() {
 
 	// 创建 agent 客户端
 	agentClient := agent.NewClient(cfg)
+	agentClient.SetConfigPath(cfgFile)
 	if embeddedXray != nil {
 		agentClient.SetEmbeddedXray(embeddedXray)
 	}
 	// 注入 WARP 状态查询回调,让 auth/heartbeat 上报 warp_installed
 	agentClient.SetWarpStatusFn(warpService.IsInstalled)
+	agentClient.SetNginxModeHook(manageHandler.SetNginxMode)
 	manageHandler.OnEmbeddedXrayStart(func(ex *embedded.EmbeddedXray) {
 		agentClient.SetEmbeddedXray(ex)
 	})
@@ -430,7 +457,7 @@ func main() {
 
 	// 注册 HTTP 路由
 	mux := http.NewServeMux()
-	handler.RegisterChildRoutes(mux, apiHandler, manageHandler, warpHandler)
+	handler.RegisterChildRoutes(mux, apiHandler, manageHandler, warpHandler, lineSpeedHandler)
 
 	// 注入 mux 给 client,让 WS RPC 路径(master 反向调用)能复用同一份 /api/child/* handler
 	// 实例。共享 mux 意味着 handler 任何后续 bug fix 都同时覆盖 HTTP 和 WS RPC 路径。
@@ -903,6 +930,7 @@ func initXrayConfig(path string, stealMode string) {
 //     (api 是 gRPC 命令通道、tunnel-in 是 reality 443 的 TLS 入站,都只能 tcp,跳过。)
 //   - 转发出站(protocol freedom,tag 以 "tunnel-" 开头):domainStrategy 若为 UseIP* 则改 AsIs。
 //     UseIP 会按包重解析目标 → UDP 退化成对称 NAT;AsIs 不重解析,保住 full-cone。
+//
 // 仅在有改动时写回,避免每次启动无谓写盘。
 func patchTunnelForwardUDPFullcone(path string) {
 	data, err := os.ReadFile(path)

@@ -21,6 +21,11 @@ const (
 )
 
 const (
+	NginxModeManaged       = "managed"
+	NginxModeReuseExisting = "reuse_existing"
+)
+
+const (
 	DefaultListenPort = "23889"
 )
 

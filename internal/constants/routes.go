@@ -45,6 +45,7 @@ const (
 	PathChildSwitchXrayMode   = "/api/child/agent/switch-xray-mode"
 	PathChildSwitchListenPort = "/api/child/agent/switch-listen-port"
 	PathChildUpdateMasterURL  = "/api/child/agent/update-master-url"
+	PathChildAgentUninstallV2 = "/api/child/agent/uninstall-v2"
 	PathChildTakeoverXray     = "/api/child/external-xray/takeover"
 	// PathChildBatchApply 一次性提交多个 inbound add-client + routing rule add_user 改动,
 	// 在 inboundsMu 锁内单次读 config + 单次写盘 + per-inbound runtime apply 完成。
@@ -56,7 +57,14 @@ const (
 	PathChildWarpStatus  = "/api/child/warp/status"
 	PathChildWarpLicense = "/api/child/warp/license"
 	PathChildWarpRemove  = "/api/child/warp/remove"
+
+	PathChildLineSpeedStatus  = "/api/child/line-speedtest/status"
+	PathChildLineSpeedInstall = "/api/child/line-speedtest/install"
+	PathChildLineSpeedRemove  = "/api/child/line-speedtest/remove"
+	PathChildLineSpeedRun     = "/api/child/line-speedtest/run"
 )
+
+const CapabilityAgentUninstallV2 = "agent_uninstall_v2"
 
 const (
 	PathChildXrayInstallStream    = "/api/child/xray/install-stream"

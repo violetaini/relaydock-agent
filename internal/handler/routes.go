@@ -7,8 +7,8 @@ import (
 )
 
 // 注册子端 API 路由
-// warpHandler 可选,为 nil 时不注册 WARP 相关 endpoint(向后兼容老版本部署)。
-func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandler *ManageHandler, warpHandler *WarpHandler) {
+// 可选 handler 为 nil 时跳过对应 endpoint,保持老版本部署兼容。
+func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandler *ManageHandler, warpHandler *WarpHandler, lineSpeedHandler *LineSpeedHandler) {
 	// 拉取模式数据接口
 	mux.HandleFunc(constants.PathChildTraffic, apiHandler.ServeHTTP)
 	mux.HandleFunc(constants.PathChildSpeed, apiHandler.ServeSpeedHTTP)
@@ -45,6 +45,7 @@ func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandl
 	mux.HandleFunc(constants.PathChildSwitchXrayMode, manageHandler.HandleSwitchXrayMode)
 	mux.HandleFunc(constants.PathChildSwitchListenPort, manageHandler.HandleSwitchListenPort)
 	mux.HandleFunc(constants.PathChildUpdateMasterURL, manageHandler.HandleUpdateMasterURL)
+	mux.HandleFunc(constants.PathChildAgentUninstallV2, manageHandler.HandleAgentUninstallV2)
 	mux.HandleFunc(constants.PathChildTakeoverXray, manageHandler.HandleTakeoverExternalXray)
 
 	// SSE 流式安装和卸载接口
@@ -61,5 +62,12 @@ func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandl
 		mux.HandleFunc(constants.PathChildWarpStatus, warpHandler.HandleStatus)
 		mux.HandleFunc(constants.PathChildWarpLicense, warpHandler.HandleLicense)
 		mux.HandleFunc(constants.PathChildWarpRemove, warpHandler.HandleRemove)
+	}
+
+	if lineSpeedHandler != nil {
+		mux.HandleFunc(constants.PathChildLineSpeedStatus, lineSpeedHandler.HandleStatus)
+		mux.HandleFunc(constants.PathChildLineSpeedInstall, lineSpeedHandler.HandleInstall)
+		mux.HandleFunc(constants.PathChildLineSpeedRemove, lineSpeedHandler.HandleRemove)
+		mux.HandleFunc(constants.PathChildLineSpeedRun, lineSpeedHandler.HandleRun)
 	}
 }

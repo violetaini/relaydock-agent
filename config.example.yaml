@@ -16,6 +16,10 @@ connection_mode: "auto"
 # HTTP 监听端口 (Pull 模式和管理 API)
 listen_port: "23889"
 
+# Nginx ownership mode: managed | reuse_existing
+# reuse_existing leaves the existing Nginx installation and main nginx.conf owned externally.
+nginx_mode: "managed"
+
 # 流量上报间隔
 traffic_report_interval: 1m
 
