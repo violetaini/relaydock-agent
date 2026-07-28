@@ -45,34 +45,59 @@ func restoreConfigFile(path string, snapshot configFileSnapshot) error {
 	if !snapshot.existed {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
+		} else if err == nil {
+			return syncInboundMutationFenceParent(path)
 		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
+	return writeFileAtomicDurable(path, snapshot.content, snapshot.mode)
+}
+
+func writeXrayConfigAtomic(path string, content []byte) error {
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return writeFileAtomicDurable(path, content, mode)
+}
+
+func writeFileAtomicDurable(path string, content []byte, mode os.FileMode) (returnErr error) {
 	file, err := os.CreateTemp(filepath.Dir(path), ".arcway-xray-rollback-*.json")
 	if err != nil {
 		return err
 	}
 	tempPath := file.Name()
-	defer os.Remove(tempPath)
-	if _, err := file.Write(snapshot.content); err != nil {
-		file.Close()
+	closed := false
+	defer func() { _ = os.Remove(tempPath) }()
+	defer func() {
+		if !closed {
+			if closeErr := file.Close(); returnErr == nil && closeErr != nil {
+				returnErr = closeErr
+			}
+		}
+	}()
+	if _, err := file.Write(content); err != nil {
 		return err
 	}
-	if err := file.Chmod(snapshot.mode); err != nil {
-		file.Close()
+	if err := file.Chmod(mode); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
 		return err
 	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, path)
+	closed = true
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	return syncInboundMutationFenceParent(path)
 }
 
 func syncArcwayInboundFirewall(ctx context.Context) error {

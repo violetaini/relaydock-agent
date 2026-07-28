@@ -290,6 +290,20 @@ func main() {
 	// 创建处理器
 	manageHandler := handler.NewManageHandler(cfg.Token, cfg.RestartMethod, cfg.RestartCommand)
 	manageHandler.SetConfigPath(cfgFile)
+	legacyXrayConfigPaths := make([]string, 0, len(cfg.XrayServers))
+	for _, server := range cfg.XrayServers {
+		if strings.TrimSpace(server.ConfigPath) != "" {
+			legacyXrayConfigPaths = append(legacyXrayConfigPaths, server.ConfigPath)
+		}
+	}
+	manageHandler.SetInboundMutationFenceLegacyConfigPaths(legacyXrayConfigPaths)
+	if err := manageHandler.InitializeInboundMutationFences(); err != nil {
+		log.Fatalf("Failed to initialize inbound mutation ownership: %v", err)
+	}
+	pendingInboundRecovery, err := manageHandler.HasPendingInboundMutationRecovery()
+	if err != nil {
+		log.Fatalf("Failed to inspect inbound mutation recovery state: %v", err)
+	}
 	manageHandler.SetLogPath(cfg.LogPath) // 供「Agent 日志」页读取 agent 自身日志文件
 	manageHandler.SetMasterURL(cfg.MasterURL)
 	manageHandler.SetXrayMode(cfg.XrayMode)
@@ -367,14 +381,18 @@ func main() {
 		}
 
 		ensureGeoData()
-		initXrayConfig(configPath, cfg.StealMode)
-		// 补全配置（api、stats、policy、routing等）
-		if result := manageHandler.EnsureXrayConfig(); result.Modified {
-			log.Printf("[Main] Embedded mode: config auto-completed, added: %v", result.AddedSections)
-		}
+		if pendingInboundRecovery {
+			log.Printf("[Main] Pending inbound mutation detected; deferring embedded Xray config auto-updates until recovery")
+		} else {
+			initXrayConfig(configPath, cfg.StealMode)
+			// 补全配置（api、stats、policy、routing等）
+			if result := manageHandler.EnsureXrayConfig(); result.Modified {
+				log.Printf("[Main] Embedded mode: config auto-completed, added: %v", result.AddedSections)
+			}
 
-		// 启动自愈:给端口转发补齐 UDP + full-cone(修历史遗留的 tcp-only 入站 / freedom UseIP 出站)。
-		patchTunnelForwardUDPFullcone(configPath)
+			// 启动自愈:给端口转发补齐 UDP + full-cone(修历史遗留的 tcp-only 入站 / freedom UseIP 出站)。
+			patchTunnelForwardUDPFullcone(configPath)
+		}
 
 		if !xrayAuthorized {
 			// 超额未授权:准备好配置但不启动 xray。留 embeddedXray=nil,待主控重新授权时
@@ -398,6 +416,8 @@ func main() {
 		// tunnel 模式下 StopXray 会先让 nginx 接管 443。
 		log.Printf("[Main] 许可证配额未授权,停止 xray 服务")
 		manageHandler.StopXray()
+	} else if embeddedXray == nil && pendingInboundRecovery {
+		log.Printf("[Main] Pending inbound mutation detected; deferring external Xray config auto-update until recovery")
 	} else if embeddedXray == nil {
 		log.Printf("[Main] Running startup xray auto-detection...")
 		result := manageHandler.EnsureXrayConfig()
@@ -419,6 +439,14 @@ func main() {
 	// list 端点里的同名兜底也保留,作 defense-in-depth(配置后续被手改回缺 tag 时仍能修)。
 	// 注:放在 EnsureXrayConfig + 可能的 RestartXray 之后,确保 xray 配置已就位、路径稳定。
 	manageHandler.PromoteAllTagsOnStartup()
+	if xrayAuthorized {
+		// A crash may leave an inbound ownership WAL pending after its config was
+		// written but before runtime apply. Force runtime to reload the durable
+		// config before that owner is exposed to the control plane.
+		if err := manageHandler.RecoverInboundMutationFences(); err != nil {
+			log.Printf("[Main] Pending inbound ownership remains blocked: %v", err)
+		}
+	}
 
 	// 创建 agent 客户端
 	agentClient := agent.NewClient(cfg)
@@ -429,6 +457,7 @@ func main() {
 	// 注入 WARP 状态查询回调,让 auth/heartbeat 上报 warp_installed
 	agentClient.SetWarpStatusFn(warpService.IsInstalled)
 	agentClient.SetNginxModeHook(manageHandler.SetNginxMode)
+	agentClient.SetXrayRestartHandler(manageHandler.RestartXray)
 	manageHandler.OnEmbeddedXrayStart(func(ex *embedded.EmbeddedXray) {
 		agentClient.SetEmbeddedXray(ex)
 	})

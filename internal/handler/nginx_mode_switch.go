@@ -39,12 +39,14 @@ func (h *ManageHandler) HandleSwitchNginxMode(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "Config path not set")
 		return
 	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
 	if err := persistAgentConfigValue(h.configPath, "nginx_mode", req.NginxMode); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Persist nginx_mode: %v", err))
 		return
 	}
 
-	h.SetNginxMode(req.NginxMode)
+	h.setNginxModeLocked(req.NginxMode)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"nginx_mode": req.NginxMode,

@@ -32,7 +32,6 @@ import (
 	"mmw-agent/internal/util"
 	"mmw-agent/internal/version"
 	"mmw-agent/internal/xrayconf"
-	"mmw-agent/internal/xrayctl"
 
 	"github.com/gorilla/websocket"
 )
@@ -139,6 +138,10 @@ type Client struct {
 	// sync with a control-plane nginx_mode update.
 	nginxModeHook func(string)
 
+	// xrayRestartHook serializes WS certificate-triggered restarts with inbound
+	// config/runtime transactions in ManageHandler.
+	xrayRestartHook func() error
+
 	// 端口隐身钩子:WS 鉴权成功 → onWSConnected(主程序据此延迟关闭入站监听,隐藏端口);
 	// WS 断开 → onWSDisconnected(主程序立即重开监听,保证主控 HTTP/pull 回退可达)。
 	// nil = 未启用该特性 → 监听始终常开,行为同旧版。
@@ -175,6 +178,11 @@ func (c *Client) SetWarpStatusFn(fn func() bool) {
 // SetNginxModeHook receives validated nginx_mode changes from the control plane.
 func (c *Client) SetNginxModeHook(fn func(string)) {
 	c.nginxModeHook = fn
+}
+
+// SetXrayRestartHandler injects the lifecycle-safe Xray restart entry point.
+func (c *Client) SetXrayRestartHandler(fn func() error) {
+	c.xrayRestartHook = fn
 }
 
 // SetConfigPath identifies the active YAML file used for persisted control-plane updates.
@@ -2029,14 +2037,14 @@ func (c *Client) handleMessage(conn *websocket.Conn, message []byte) {
 func (c *Client) handleCertDeploy(payload WSCertDeployPayload) {
 	log.Printf("[Agent] Received cert_deploy for domain: %s, target: %s", payload.Domain, payload.Reload)
 
-	if err := deployCert(payload.CertPEM, payload.KeyPEM, payload.CertPath, payload.KeyPath, payload.Reload); err != nil {
+	if err := deployCert(payload.CertPEM, payload.KeyPEM, payload.CertPath, payload.KeyPath, payload.Reload, c.xrayRestartHook); err != nil {
 		log.Printf("[Agent] cert_deploy failed for %s: %v", payload.Domain, err)
 	} else {
 		log.Printf("[Agent] cert_deploy succeeded for %s", payload.Domain)
 	}
 }
 
-func deployCert(certPEM, keyPEM, certPath, keyPath, reloadTarget string) error {
+func deployCert(certPEM, keyPEM, certPath, keyPath, reloadTarget string, restartXray func() error) error {
 	if certPath == "" || keyPath == "" {
 		return fmt.Errorf("deploy paths are required")
 	}
@@ -2064,16 +2072,23 @@ func deployCert(certPEM, keyPEM, certPath, keyPath, reloadTarget string) error {
 		return fmt.Errorf("write key: %w", err)
 	}
 
-	switch reloadTarget {
-	case "nginx":
-		return reloadNginxCmd()
-	case "xray":
-		return xrayctl.RestartXray("auto", "")
-	case "both":
-		if err := reloadNginxCmd(); err != nil {
+	return reloadCertServices(reloadTarget, reloadNginxCmd, restartXray)
+}
+
+func reloadCertServices(reloadTarget string, reloadNginx, restartXray func() error) error {
+	if reloadTarget == "nginx" || reloadTarget == "both" {
+		if reloadNginx == nil {
+			return fmt.Errorf("nginx reload handler is unavailable")
+		}
+		if err := reloadNginx(); err != nil {
 			return err
 		}
-		return xrayctl.RestartXray("auto", "")
+	}
+	if reloadTarget == "xray" || reloadTarget == "both" {
+		if restartXray == nil {
+			return fmt.Errorf("xray restart handler is unavailable")
+		}
+		return restartXray()
 	}
 	return nil
 }

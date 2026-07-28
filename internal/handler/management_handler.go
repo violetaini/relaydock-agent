@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -64,12 +65,16 @@ type ManageHandler struct {
 	logPath string
 	// xrayAccessLogPath 是内嵌 xray 的 access log 文件(见 config.XrayAccessLogPathFor)。
 	// 内嵌模式下 service=xray 读它,而不是查 journalctl -u xray(那个 unit 不存在)。
-	xrayAccessLogPath           string
-	inboundMutationFencePath    string
-	inboundMutationFencesLoaded bool
-	inboundMutationFences       map[string]inboundMutationFenceState
-	inboundFirewallSync         func(context.Context) error
-	agentUninstallV2Supported   func() bool
+	xrayAccessLogPath               string
+	inboundMutationFencePath        string
+	inboundMutationFenceLegacyPaths []string
+	inboundMutationFencesLoaded     bool
+	inboundMutationRecoveryReady    bool
+	inboundMutationFences           map[string]inboundMutationFenceState
+	inboundMutationRuntimeConverge  func() error
+	inboundMutationRuntimeApply     func(context.Context, string, map[string]interface{}, bool) error
+	inboundFirewallSync             func(context.Context) error
+	agentUninstallV2Supported       func() bool
 	// agentUpgradeReleaseResolver resolves a signed GitHub release before an
 	// upgrade begins. It is injectable so the refusal path stays testable
 	// without spawning the replacement script.
@@ -99,6 +104,7 @@ func NewManageHandler(configToken, restartMethod, restartCommand string) *Manage
 // SetConfigPath 设置 agent 配置文件路径，用于运行时修改配置。
 func (h *ManageHandler) SetConfigPath(path string) {
 	h.configPath = path
+	h.setInboundMutationFenceAgentConfigPath(path)
 }
 
 // SetMasterURL updates the trusted control-plane origin used to validate
@@ -122,6 +128,12 @@ func (h *ManageHandler) SetXrayMode(mode string) {
 
 // SetNginxMode switches the ownership boundary used by Nginx management APIs.
 func (h *ManageHandler) SetNginxMode(mode string) {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	h.setNginxModeLocked(mode)
+}
+
+func (h *ManageHandler) setNginxModeLocked(mode string) {
 	normalized, err := normalizeNginxMode(mode)
 	if err != nil {
 		log.Printf("[Manage] Ignoring invalid nginx mode %q: %v", mode, err)
@@ -170,6 +182,16 @@ func (h *ManageHandler) GetEmbeddedXray() *embedded.EmbeddedXray {
 
 // RestartXray 使用配置的重启方式重启 xray。
 func (h *ManageHandler) RestartXray() error {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.restartXrayLocked(); err != nil {
+		return err
+	}
+	return h.completeInboundMutationRecoveryAfterRuntimeStartLocked()
+}
+
+// restartXrayLocked restarts Xray while the caller holds inboundsMu.
+func (h *ManageHandler) restartXrayLocked() error {
 	if h.xrayMode == "embedded" {
 		h.embeddedMu.Lock()
 		defer h.embeddedMu.Unlock()
@@ -184,7 +206,13 @@ func (h *ManageHandler) RestartXray() error {
 // StopXray 停止 xray:tunnel 模式先恢复 nginx 443 fallback 再停,让 nginx 接管 443。
 // 与 HandleServiceControl 的 stop 分支同源逻辑,供许可证配额授权回调(超额停机)复用。
 func (h *ManageHandler) StopXray() {
-	if h.configNeedsPort443() {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	h.stopXrayLocked()
+}
+
+func (h *ManageHandler) stopXrayLocked() {
+	if h.configNeedsPort443() && !h.reusesExistingNginx() {
 		h.deployFallback443()
 		h.reloadNginx()
 	}
@@ -198,13 +226,22 @@ func (h *ManageHandler) StopXray() {
 // StartXray 启动 xray:tunnel 模式先移除 nginx 443 fallback 释放端口再启,失败则回滚 fallback。
 // 与 HandleServiceControl 的 start 分支同源逻辑,供许可证配额授权回调(拿到名额启机)复用。
 func (h *ManageHandler) StartXray() error {
-	if h.configNeedsPort443() {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.startXrayLocked(); err != nil {
+		return err
+	}
+	return h.completeInboundMutationRecoveryAfterRuntimeStartLocked()
+}
+
+func (h *ManageHandler) startXrayLocked() error {
+	if h.configNeedsPort443() && !h.reusesExistingNginx() {
 		h.removeFallback443()
 		h.reloadNginx()
 		time.Sleep(300 * time.Millisecond)
 	}
-	if err := h.RestartXray(); err != nil {
-		if h.configNeedsPort443() {
+	if err := h.restartXrayLocked(); err != nil {
+		if h.configNeedsPort443() && !h.reusesExistingNginx() {
 			h.deployFallback443()
 			h.reloadNginx()
 		}
@@ -638,41 +675,9 @@ func (h *ManageHandler) HandleServiceControl(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	} else if req.Service == "xray" && req.Action == "stop" {
-		// tunnel 模式：停止前恢复 nginx stream fallback，让 nginx 直接接管 443
-		if h.configNeedsPort443() && !h.reusesExistingNginx() {
-			h.deployFallback443()
-			h.reloadNginx()
-		}
-		log.Printf("[Manage] Service xray: stop (deferred)")
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"message": "Service xray stopped successfully",
-		})
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			if h.embeddedXray != nil {
-				h.embeddedXray.Stop()
-			} else {
-				exec.Command("systemctl", "stop", "xray").Run()
-			}
-		}()
-		return
+		h.StopXray()
 	} else if req.Service == "xray" && req.Action == "start" {
-		// tunnel 模式：启动前移除 nginx stream fallback，释放 443 端口
-		if h.configNeedsPort443() && !h.reusesExistingNginx() {
-			h.removeFallback443()
-			h.reloadNginx()
-			time.Sleep(300 * time.Millisecond)
-		}
-		if err := h.RestartXray(); err != nil {
-			// 启动失败，恢复 fallback
-			if h.configNeedsPort443() && !h.reusesExistingNginx() {
-				h.deployFallback443()
-				h.reloadNginx()
-			}
+		if err := h.StartXray(); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("启动 xray 失败: %v %s", err, serviceFailureDetail("xray")))
 			return
 		}
@@ -684,7 +689,6 @@ func (h *ManageHandler) HandleServiceControl(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-
 	log.Printf("[Manage] Service %s: %s", req.Service, req.Action)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -716,6 +720,12 @@ func (h *ManageHandler) HandleXrayInstall(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray installation blocked: "+err.Error())
+		return
+	}
 
 	log.Printf("[Manage] Installing Xray...")
 
@@ -736,7 +746,7 @@ func (h *ManageHandler) HandleXrayInstall(w http.ResponseWriter, r *http.Request
 	log.Printf("[Manage] Xray installed successfully")
 
 	// 若无配置则下发默认配置
-	h.DeployDefaultXrayConfig()
+	h.deployDefaultXrayConfigLocked()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
@@ -754,6 +764,12 @@ func (h *ManageHandler) HandleXrayRemove(w http.ResponseWriter, r *http.Request)
 
 	if !h.authenticate(r) {
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray removal blocked: "+err.Error())
 		return
 	}
 
@@ -873,6 +889,10 @@ func (h *ManageHandler) setXrayConfig(w http.ResponseWriter, r *http.Request) {
 	// firewall-failure rollback.
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray config mutation blocked: "+err.Error())
+		return
+	}
 	snapshot, err := captureConfigFile(configPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to snapshot config: %v", err))
@@ -1103,6 +1123,13 @@ func (h *ManageHandler) updateXraySystemConfig(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray system config mutation blocked: "+err.Error())
+		return
+	}
+
 	configPath := h.findXrayConfigPath()
 	if configPath == "" {
 		writeError(w, http.StatusNotFound, "Xray config not found")
@@ -1227,7 +1254,7 @@ func (h *ManageHandler) updateXraySystemConfig(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if err := h.RestartXray(); err != nil {
+	if err := h.restartXrayLocked(); err != nil {
 		log.Printf("[Manage] Warning: failed to restart xray: %v", err)
 	}
 
@@ -1869,6 +1896,13 @@ func (h *ManageHandler) saveXrayConfigFile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray config file mutation blocked: "+err.Error())
+		return
+	}
+
 	req.File = filepath.Base(req.File)
 	if !strings.HasSuffix(req.File, ".json") {
 		req.File += ".json"
@@ -2141,6 +2175,13 @@ func (h *ManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ManageHandler) listInbounds(w http.ResponseWriter, r *http.Request) {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Inbound inventory blocked: "+err.Error())
+		return
+	}
+
 	// 老 mmw / 手写 xray config 里 inbound 可能没 tag,后续主控做 remove+add 时找不到 → 配置里残留旧 inbound 同端口 → xray 启动失败。
 	// 不在内存里"虚拟一个 tag",而是直接把生成的 tag 写回到磁盘配置,把脏数据修干净,后续所有 remove/add 都按真实 tag 走。
 	// 整个 list 流程现在的"读"步骤会带轻量"写",但只在真的有 inbound 缺 tag 时才真改文件,常规情况无副作用。
@@ -2149,10 +2190,17 @@ func (h *ManageHandler) listInbounds(w http.ResponseWriter, r *http.Request) {
 	configInbounds := h.getInboundsFromConfig()
 	runtimeTags := h.getInboundTagsFromGRPC()
 	mergedInbounds := h.mergeInbounds(configInbounds, runtimeTags)
+	mutationOwners, err := h.annotateInboundMutationInventoryLocked(mergedInbounds)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to load inbound mutation inventory: %v", err))
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":  true,
-		"inbounds": mergedInbounds,
+		"success":              true,
+		"inbounds":             mergedInbounds,
+		"mutation_fence_known": true,
+		"mutation_owners":      mutationOwners,
 	})
 }
 
@@ -2162,6 +2210,12 @@ func (h *ManageHandler) listInbounds(w http.ResponseWriter, r *http.Request) {
 // 同时跑一遍重复 tag 清理 — 给历史残留(主控老代码 race + persistInbound 老 bug 共同造成的
 // 同 tag inbound 累加)兜底。
 func (h *ManageHandler) PromoteAllTagsOnStartup() {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		log.Printf("[Manage] skip startup Xray config normalization while inbound recovery is pending: %v", err)
+		return
+	}
 	h.promoteInboundTagsToConfig()
 	if cfg := h.findXrayConfigPath(); cfg != "" {
 		promoteOutboundTagsInFile(cfg)
@@ -2568,16 +2622,27 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 	// 走同一把锁,避免并发请求间的 read-modify-write 撕裂。
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
-	if skipRemove, err := h.beginInboundMutationLocked(action, &req); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Inbound mutation blocked: "+err.Error())
 		return
-	} else if skipRemove {
-		response := map[string]interface{}{"success": true, "message": "Inbound removal superseded by a newer mutation"}
-		if req.MutationID != "" {
-			response["mutation_id"] = req.MutationID
+	}
+	if action == "remove" {
+		if skipRemove, _, err := h.beginInboundMutationLocked(action, &req); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		} else if skipRemove {
+			response := map[string]interface{}{
+				"success":    true,
+				"message":    "Inbound removal superseded by a newer mutation",
+				"superseded": true,
+				"changed":    false,
+			}
+			if req.MutationID != "" {
+				response["mutation_id"] = req.MutationID
+			}
+			writeJSON(w, http.StatusOK, response)
+			return
 		}
-		writeJSON(w, http.StatusOK, response)
-		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -2638,38 +2703,57 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		if err := h.addInbound(ctx, clients.Handler, req.Inbound); err != nil {
-			rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, tag, original, clients.Handler)
-			message := fmt.Sprintf("Failed to add inbound: %v", err)
-			if rollbackErr != nil {
-				message += "; " + rollbackErr.Error()
-			}
-			writeError(w, http.StatusInternalServerError, message)
+		preparedInbound, err := prepareInboundForPersistence(snapshot, req.Inbound)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to prepare inbound: %v", err))
 			return
 		}
+		req.Inbound = preparedInbound
 
-		if err := h.persistInbound(req.Inbound); err != nil {
-			log.Printf("[Manage] Error: Failed to persist inbound to config: %v", err)
-			rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, tag, original, clients.Handler)
-			message := fmt.Sprintf("Failed to persist inbound: %v", err)
-			if rollbackErr == nil {
-				message += "; runtime, config, and firewall state restored"
-			} else {
-				message += "; " + rollbackErr.Error()
+		if err := h.applyInboundAddMutationLocked(&req, configPath, original, func() error {
+			// Persist the intended generation first. The mutation WAL can then use
+			// the durable config as the recovery authority if the Agent exits before
+			// the runtime or firewall phase completes.
+			if err := h.persistInboundAtPath(configPath, req.Inbound); err != nil {
+				log.Printf("[Manage] Error: Failed to persist inbound to config: %v", err)
+				rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, tag, original, clients.Handler)
+				message := fmt.Sprintf("Failed to persist inbound: %v", err)
+				if rollbackErr == nil {
+					message += "; runtime, config, and firewall state restored"
+				} else {
+					message += "; " + rollbackErr.Error()
+					return markInboundMutationRollbackUncertain(errors.New(message))
+				}
+				return errors.New(message)
 			}
-			writeError(w, http.StatusInternalServerError, message)
-			return
-		}
-		if firewallErr := h.reconcileInboundFirewall(); firewallErr != nil {
-			rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, tag, original, clients.Handler)
-			message := fmt.Sprintf("Failed to synchronize inbound firewall: %v", firewallErr)
-			if rollbackErr == nil {
-				message += "; runtime, config, and firewall state restored"
-			} else {
-				message += "; " + rollbackErr.Error()
+			if firewallErr := h.reconcileInboundFirewall(); firewallErr != nil {
+				rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, tag, original, clients.Handler)
+				message := fmt.Sprintf("Failed to synchronize inbound firewall: %v", firewallErr)
+				if rollbackErr == nil {
+					message += "; runtime, config, and firewall state restored"
+				} else {
+					message += "; " + rollbackErr.Error()
+					return markInboundMutationRollbackUncertain(errors.New(message))
+				}
+				return errors.New(message)
 			}
-			writeError(w, http.StatusInternalServerError, message)
+			if err := h.addInbound(ctx, clients.Handler, req.Inbound); err != nil {
+				rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, tag, original, clients.Handler)
+				message := fmt.Sprintf("Failed to add inbound: %v", err)
+				if rollbackErr != nil {
+					message += "; " + rollbackErr.Error()
+					return markInboundMutationRollbackUncertain(errors.New(message))
+				}
+				return errors.New(message)
+			}
+			return nil
+		}); err != nil {
+			status := http.StatusInternalServerError
+			var reservationErr *inboundMutationReservationError
+			if errors.As(err, &reservationErr) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 
@@ -2703,20 +2787,21 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 尝试从运行态移除（未运行时报错可忽略）
+		// Only an explicit not-found is idempotent success. A timeout or transport
+		// error cannot prove the runtime inbound stopped serving traffic, so do not
+		// mutate disk or acknowledge the generation in that case.
 		runtimeErr := h.removeInbound(ctx, clients.Handler, req.Tag)
-		if runtimeErr != nil {
-			log.Printf("[Manage] Warning: Failed to remove inbound from runtime: %v", runtimeErr)
+		if runtimeErr != nil && !isMissingInboundError(runtimeErr) {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to remove inbound from runtime: %v", runtimeErr))
+			return
 		}
 
 		// 从配置文件移除（主流程）
-		configErr := h.removeInboundFromConfig(req.Tag)
+		configErr := h.removeInboundFromConfigAtPath(configPath, req.Tag)
 		if configErr != nil {
 			log.Printf("[Manage] Warning: Failed to remove inbound from config: %v", configErr)
 		}
 
-		// 配置文件操作成功即可视为成功（运行态移除可选）
-		// 配置改动后若未重启，运行态可能还没有该入站
 		if configErr != nil {
 			rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, req.Tag, original, clients.Handler)
 			message := fmt.Sprintf("Failed to remove inbound from config: %v", configErr)
@@ -2790,6 +2875,12 @@ func (h *ManageHandler) manageInboundEmbedded(w http.ResponseWriter, ctx context
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		preparedInbound, err := prepareInboundForPersistence(snapshot, req.Inbound)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to prepare inbound: %v", err))
+			return
+		}
+		req.Inbound = preparedInbound
 
 		inboundJSON, err := json.Marshal(req.Inbound)
 		if err != nil {
@@ -2807,39 +2898,49 @@ func (h *ManageHandler) manageInboundEmbedded(w http.ResponseWriter, ctx context
 			return
 		}
 
-		_ = h.embeddedXray.RemoveInbound(tag)
+		if err := h.applyInboundAddMutationLocked(req, configPath, original, func() error {
+			if err := h.persistInboundAtPath(configPath, req.Inbound); err != nil {
+				log.Printf("[Manage] Error: Failed to persist inbound to config: %v", err)
+				rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, tag, original)
+				message := fmt.Sprintf("Failed to persist inbound: %v", err)
+				if rollbackErr == nil {
+					message += "; runtime, config, and firewall state restored"
+				} else {
+					message += "; " + rollbackErr.Error()
+					return markInboundMutationRollbackUncertain(errors.New(message))
+				}
+				return errors.New(message)
+			}
+			if firewallErr := h.reconcileInboundFirewall(); firewallErr != nil {
+				rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, tag, original)
+				message := fmt.Sprintf("Failed to synchronize inbound firewall: %v", firewallErr)
+				if rollbackErr == nil {
+					message += "; runtime, config, and firewall state restored"
+				} else {
+					message += "; " + rollbackErr.Error()
+					return markInboundMutationRollbackUncertain(errors.New(message))
+				}
+				return errors.New(message)
+			}
+			_ = h.embeddedXray.RemoveInbound(tag)
 
-		if err := h.embeddedXray.AddInbound(rawConfig); err != nil {
-			rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, tag, original)
-			message := fmt.Sprintf("Failed to add inbound: %v", err)
-			if rollbackErr != nil {
-				message += "; " + rollbackErr.Error()
+			if err := h.embeddedXray.AddInbound(rawConfig); err != nil {
+				rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, tag, original)
+				message := fmt.Sprintf("Failed to add inbound: %v", err)
+				if rollbackErr != nil {
+					message += "; " + rollbackErr.Error()
+					return markInboundMutationRollbackUncertain(errors.New(message))
+				}
+				return errors.New(message)
 			}
-			writeError(w, http.StatusInternalServerError, message)
-			return
-		}
-
-		if err := h.persistInbound(req.Inbound); err != nil {
-			log.Printf("[Manage] Error: Failed to persist inbound to config: %v", err)
-			rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, tag, original)
-			message := fmt.Sprintf("Failed to persist inbound: %v", err)
-			if rollbackErr == nil {
-				message += "; runtime, config, and firewall state restored"
-			} else {
-				message += "; " + rollbackErr.Error()
+			return nil
+		}); err != nil {
+			status := http.StatusInternalServerError
+			var reservationErr *inboundMutationReservationError
+			if errors.As(err, &reservationErr) {
+				status = http.StatusConflict
 			}
-			writeError(w, http.StatusInternalServerError, message)
-			return
-		}
-		if firewallErr := h.reconcileInboundFirewall(); firewallErr != nil {
-			rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, tag, original)
-			message := fmt.Sprintf("Failed to synchronize inbound firewall: %v", firewallErr)
-			if rollbackErr == nil {
-				message += "; runtime, config, and firewall state restored"
-			} else {
-				message += "; " + rollbackErr.Error()
-			}
-			writeError(w, http.StatusInternalServerError, message)
+			writeError(w, status, err.Error())
 			return
 		}
 
@@ -2874,11 +2975,12 @@ func (h *ManageHandler) manageInboundEmbedded(w http.ResponseWriter, ctx context
 		}
 
 		runtimeErr := h.embeddedXray.RemoveInbound(req.Tag)
-		if runtimeErr != nil {
-			log.Printf("[Manage] Warning: Failed to remove inbound from runtime: %v", runtimeErr)
+		if runtimeErr != nil && !isMissingInboundError(runtimeErr) {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to remove inbound from runtime: %v", runtimeErr))
+			return
 		}
 
-		configErr := h.removeInboundFromConfig(req.Tag)
+		configErr := h.removeInboundFromConfigAtPath(configPath, req.Tag)
 		if configErr != nil {
 			log.Printf("[Manage] Warning: Failed to remove inbound from config: %v", configErr)
 		}
@@ -3243,6 +3345,33 @@ func (h *ManageHandler) replaceRuntimeInbound(ctx context.Context, tag string, n
 	return h.addInbound(ctx, clients.Handler, newInbound)
 }
 
+// removeRuntimeInboundForRecovery removes the durable absence of an inbound
+// from the live runtime. Only an explicit not-found is an idempotent success;
+// transport and timeout failures leave the mutation pending and fail closed.
+func (h *ManageHandler) removeRuntimeInboundForRecovery(ctx context.Context, tag string) error {
+	if h.xrayMode == "embedded" && h.embeddedXray != nil {
+		err := h.embeddedXray.RemoveInbound(tag)
+		if err != nil && !isMissingInboundError(err) {
+			return err
+		}
+		return nil
+	}
+
+	apiPort := h.findXrayAPIPort()
+	if apiPort == 0 {
+		return fmt.Errorf("xray API port not found")
+	}
+	clients, err := xrpc.New(ctx, constants.LocalhostIP, uint16(apiPort))
+	if err != nil {
+		return fmt.Errorf("connect xray: %w", err)
+	}
+	defer clients.Connection.Close()
+	if err := h.removeInbound(ctx, clients.Handler, tag); err != nil && !isMissingInboundError(err) {
+		return err
+	}
+	return nil
+}
+
 // matchClientCredential 按协议字段比对两个 client/account 是否同一身份。
 // 优先看协议主键(id/password/auth/user),其次回退到 email — 路由出站清理子账号时,
 // 主控只持有 email,没有完整凭据,需要这条 email 回退路径。
@@ -3318,6 +3447,13 @@ func (h *ManageHandler) HandleOutbounds(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *ManageHandler) listOutbounds(w http.ResponseWriter, r *http.Request) {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Outbound inventory blocked: "+err.Error())
+		return
+	}
+
 	configPath := h.findXrayConfigPath()
 	if configPath == "" {
 		writeError(w, http.StatusNotFound, "Xray config not found")
@@ -3406,6 +3542,13 @@ func (h *ManageHandler) manageOutbound(w http.ResponseWriter, r *http.Request) {
 	action := strings.ToLower(strings.TrimSpace(req.Action))
 	if action == "" {
 		action = "add"
+	}
+
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Outbound mutation blocked: "+err.Error())
+		return
 	}
 
 	apiPort := h.findXrayAPIPort()
@@ -3674,6 +3817,10 @@ func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 	// 主控并发绑多个用户时该 race 概率随节点数线性放大。
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Routing mutation blocked: "+err.Error())
+		return
+	}
 
 	configPath := h.findXrayConfigPath()
 	if configPath == "" {
@@ -3837,7 +3984,7 @@ func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := h.RestartXray(); err != nil {
+	if err := h.restartXrayLocked(); err != nil {
 		// 关键防呆:新 routing 配置让 xray 起不来 → 若不回滚,坏配置持久化在磁盘上,之后每次重启
 		// 都读到它、xray 永远起不来(gRPC API 死掉 → 所有出站添加报 "connection reset by peer")。
 		// 现象:重启 xray 无效、只能手动删掉那条路由出站。这里回滚到改动前的可用配置并重启,
@@ -3846,7 +3993,7 @@ func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 		rolledBack := false
 		if werr := os.WriteFile(configPath, content, 0644); werr != nil {
 			log.Printf("[Manage] 回滚写旧配置失败: %v", werr)
-		} else if rerr := h.RestartXray(); rerr != nil {
+		} else if rerr := h.restartXrayLocked(); rerr != nil {
 			log.Printf("[Manage] 回滚后重启 Xray 仍失败(旧配置可能本就有问题): %v", rerr)
 		} else {
 			rolledBack = true
@@ -4023,6 +4170,10 @@ func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request)
 
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Batch mutation blocked: "+err.Error())
+		return
+	}
 
 	configPath := h.findXrayConfigPath()
 	if configPath == "" {
@@ -4125,13 +4276,13 @@ func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request)
 
 	// routing 改动需要 xray restart 才能生效;NoRestart=true 时由 caller 统一末尾重启。
 	if routingChanged && !req.NoRestart {
-		if err := h.RestartXray(); err != nil {
+		if err := h.restartXrayLocked(); err != nil {
 			// 同 manageRouting 的防呆:坏配置让 xray 起不来时回滚到旧配置并重启,避免持久化坏配置把
 			// agent 弄挂(否则 gRPC API 死掉、所有出站添加报 connection reset,重启无效只能手删)。
 			log.Printf("[BatchApply] restart xray failed, rolling back: %v", err)
 			rolledBack := false
 			if werr := os.WriteFile(configPath, content, 0644); werr == nil {
-				if rerr := h.RestartXray(); rerr == nil {
+				if rerr := h.restartXrayLocked(); rerr == nil {
 					rolledBack = true
 				}
 			}
@@ -4289,12 +4440,7 @@ func (h *ManageHandler) removeOutbound(ctx context.Context, handlerClient comman
 	return err
 }
 
-func (h *ManageHandler) persistInbound(inbound map[string]interface{}) error {
-	configPath := h.findXrayConfigPath()
-	if configPath == "" {
-		return fmt.Errorf("config file not found")
-	}
-
+func (h *ManageHandler) persistInboundAtPath(configPath string, inbound map[string]interface{}) error {
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
@@ -4305,6 +4451,37 @@ func (h *ManageHandler) persistInbound(inbound map[string]interface{}) error {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	upsertInboundInConfig(config, inbound)
+
+	newContent, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	return writeXrayConfigAtomic(configPath, newContent)
+}
+
+func prepareInboundForPersistence(snapshot configFileSnapshot, inbound map[string]interface{}) (map[string]interface{}, error) {
+	var config map[string]interface{}
+	if snapshot.existed {
+		if err := json.Unmarshal(snapshot.content, &config); err != nil {
+			return nil, fmt.Errorf("failed to parse config: %w", err)
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+	content, err := json.Marshal(inbound)
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone inbound: %w", err)
+	}
+	var prepared map[string]interface{}
+	if err := json.Unmarshal(content, &prepared); err != nil {
+		return nil, fmt.Errorf("failed to clone inbound: %w", err)
+	}
+	return upsertInboundInConfig(config, prepared), nil
+}
+
+func upsertInboundInConfig(config map[string]interface{}, inbound map[string]interface{}) map[string]interface{} {
 	// 按 tag 去重:同 tag 已存在则替换,不存在再 append。
 	// 防止主控老代码 `GET → modify → POST remove + POST add` 在并发下因竞态丢 remove 而 append 出多份(case:套餐绑用户的 4 个 POST 在 inboundsMu 内序列化后,
 	//   M1.remove → 0
@@ -4342,20 +4519,19 @@ func (h *ManageHandler) persistInbound(inbound map[string]interface{}) error {
 	dedupeTaggedArrayInPlace(config, "inbounds")
 	dedupeTaggedArrayInPlace(config, "outbounds")
 
-	newContent, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+	if newTag != "" {
+		finalInbounds, _ := config["inbounds"].([]interface{})
+		for _, raw := range finalInbounds {
+			candidate, _ := raw.(map[string]interface{})
+			if candidateTag, _ := candidate["tag"].(string); candidateTag == newTag {
+				return candidate
+			}
+		}
 	}
-
-	return os.WriteFile(configPath, newContent, 0644)
+	return inbound
 }
 
-func (h *ManageHandler) removeInboundFromConfig(tag string) error {
-	configPath := h.findXrayConfigPath()
-	if configPath == "" {
-		return fmt.Errorf("config file not found")
-	}
-
+func (h *ManageHandler) removeInboundFromConfigAtPath(configPath, tag string) error {
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
@@ -4402,7 +4578,7 @@ func (h *ManageHandler) removeInboundFromConfig(tag string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	return os.WriteFile(configPath, newContent, 0644)
+	return writeXrayConfigAtomic(configPath, newContent)
 }
 
 func (h *ManageHandler) persistOutbound(outbound map[string]interface{}) error {
@@ -4540,7 +4716,13 @@ func (h *ManageHandler) HandleScan(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Manage] Scanning for Xray process...")
 
-	configResult := h.EnsureXrayConfig()
+	h.inboundsMu.Lock()
+	configResult := h.ensureXrayConfigLocked()
+	var scanRestartErr error
+	if configResult.Modified {
+		scanRestartErr = h.restartXrayLocked()
+	}
+	h.inboundsMu.Unlock()
 
 	response := ScanResponse{
 		Success: true,
@@ -4551,8 +4733,8 @@ func (h *ManageHandler) HandleScan(w http.ResponseWriter, r *http.Request) {
 		response.ConfigModified = true
 		response.ConfigAddedSections = configResult.AddedSections
 		log.Printf("[Manage] Xray config auto-completed, added sections: %v", configResult.AddedSections)
-		if err := h.RestartXray(); err != nil {
-			log.Printf("[Manage] Failed to restart xray after config update: %v", err)
+		if scanRestartErr != nil {
+			log.Printf("[Manage] Failed to restart xray after config update: %v", scanRestartErr)
 		} else {
 			log.Printf("[Manage] Xray restarted after config update")
 			time.Sleep(1 * time.Second)
@@ -4618,7 +4800,17 @@ type EnsureXrayConfigResult struct {
 
 // 检查并补全 Xray 配置。
 func (h *ManageHandler) EnsureXrayConfig() *EnsureXrayConfigResult {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	return h.ensureXrayConfigLocked()
+}
+
+func (h *ManageHandler) ensureXrayConfigLocked() *EnsureXrayConfigResult {
 	result := &EnsureXrayConfigResult{}
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		result.Error = "Xray config auto-update blocked: " + err.Error()
+		return result
+	}
 
 	configPath := h.findXrayConfigPath()
 	if configPath == "" {
@@ -4997,11 +5189,32 @@ func (h *ManageHandler) HandleCertDeploy(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "cert_pem, key_pem, cert_path, key_path are required")
 		return
 	}
+	xrayReload := req.Reload == "xray" || req.Reload == "both"
+	if xrayReload {
+		h.inboundsMu.Lock()
+		defer h.inboundsMu.Unlock()
+	}
+	fileReload := req.Reload
+	if req.Reload == "xray" {
+		fileReload = "none"
+	} else if req.Reload == "both" {
+		fileReload = "nginx"
+	}
 
-	if err := deployCertFiles(req.CertPEM, req.KeyPEM, req.CertPath, req.KeyPath, req.Reload); err != nil {
+	if err := deployCertFiles(req.CertPEM, req.KeyPEM, req.CertPath, req.KeyPath, fileReload); err != nil {
 		log.Printf("[CertDeploy] Failed to deploy cert for %s: %v", req.Domain, err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("deploy failed: %v", err))
 		return
+	}
+	if xrayReload {
+		if err := h.restartXrayLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("deploy succeeded but xray reload failed: %v", err))
+			return
+		}
+		if err := h.completeInboundMutationRecoveryAfterRuntimeStartLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("xray reloaded but inbound recovery remains blocked: %v", err))
+			return
+		}
 	}
 
 	log.Printf("[CertDeploy] Successfully deployed cert for %s to %s", req.Domain, req.CertPath)
@@ -5039,13 +5252,6 @@ func deployCertFiles(certPEM, keyPEM, certPath, keyPath, reloadTarget string) er
 	switch reloadTarget {
 	case "nginx":
 		return reloadNginx()
-	case "xray":
-		return xrayctl.RestartXray("auto", "")
-	case "both":
-		if err := reloadNginx(); err != nil {
-			return err
-		}
-		return xrayctl.RestartXray("auto", "")
 	}
 	return nil
 }
@@ -5525,6 +5731,16 @@ func (h *ManageHandler) HandleClearStreamPort(w http.ResponseWriter, r *http.Req
 
 // DeployDefaultXrayConfigFile 仅写入内置默认配置文件，不启动 xray。
 func (h *ManageHandler) DeployDefaultXrayConfigFile() {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		log.Printf("[Manage] Refusing default Xray config deployment: %v", err)
+		return
+	}
+	h.deployDefaultXrayConfigFileLocked()
+}
+
+func (h *ManageHandler) deployDefaultXrayConfigFileLocked() {
 	configPath := constants.DefaultXrayConfigPaths[0]
 	if _, err := os.Stat(configPath); err == nil {
 		return
@@ -5542,13 +5758,23 @@ func (h *ManageHandler) DeployDefaultXrayConfigFile() {
 
 // DeployDefaultXrayConfig 在缺失配置时写入内置默认配置并启动 xray。
 func (h *ManageHandler) DeployDefaultXrayConfig() {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		log.Printf("[Manage] Refusing default Xray config deployment: %v", err)
+		return
+	}
+	h.deployDefaultXrayConfigLocked()
+}
+
+func (h *ManageHandler) deployDefaultXrayConfigLocked() {
 	configPath := constants.DefaultXrayConfigPaths[0]
 	if _, err := os.Stat(configPath); err == nil {
 		// 配置已存在，执行 EnsureXrayConfig 补齐缺失段
-		result := h.EnsureXrayConfig()
+		result := h.ensureXrayConfigLocked()
 		if result.Modified {
 			log.Printf("[Manage] Xray config updated after install: added %v", result.AddedSections)
-			h.RestartXray()
+			_ = h.restartXrayLocked()
 		}
 		return
 	}
@@ -5562,7 +5788,7 @@ func (h *ManageHandler) DeployDefaultXrayConfig() {
 		return
 	}
 	log.Printf("[Manage] Deployed default xray config to %s", configPath)
-	h.RestartXray()
+	_ = h.restartXrayLocked()
 }
 
 // ================== SSE 流式安装/卸载 ==================
@@ -5653,6 +5879,12 @@ func (h *ManageHandler) HandleXrayInstallStream(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray installation blocked: "+err.Error())
+		return
+	}
 	log.Printf("[Manage] Starting Xray install (stream)...")
 	cmd := exec.CommandContext(r.Context(), "bash", "-c",
 		`bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`)
@@ -5660,7 +5892,7 @@ func (h *ManageHandler) HandleXrayInstallStream(w http.ResponseWriter, r *http.R
 	sseStreamCmd(w, r, cmd, "Xray installed successfully")
 
 	// 安装完成后下发默认配置
-	h.DeployDefaultXrayConfig()
+	h.deployDefaultXrayConfigLocked()
 }
 
 func (h *ManageHandler) HandleXrayRemoveStream(w http.ResponseWriter, r *http.Request) {
@@ -5670,6 +5902,12 @@ func (h *ManageHandler) HandleXrayRemoveStream(w http.ResponseWriter, r *http.Re
 	}
 	if !h.authenticate(r) {
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray removal blocked: "+err.Error())
 		return
 	}
 	log.Printf("[Manage] Starting Xray remove (stream)...")
@@ -6106,6 +6344,12 @@ func (h *ManageHandler) HandleSwitchXrayMode(w http.ResponseWriter, r *http.Requ
 
 	if h.configPath == "" {
 		writeError(w, http.StatusInternalServerError, "Config path not set")
+		return
+	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray mode switch blocked: "+err.Error())
 		return
 	}
 

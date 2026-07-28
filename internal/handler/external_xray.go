@@ -25,20 +25,26 @@ import (
 )
 
 type takeoverExternalXrayResp struct {
-	Success      bool   `json:"success"`
-	Detected     bool   `json:"detected"`       // 是否检测到正在跑的外置 xray(及配置路径)
-	ConfigPath   string `json:"config_path"`    // 合并后写入的 config 路径
-	ConfDir      string `json:"conf_dir"`       // 检测到的 confdir(可能为空)
-	MergedFiles  int    `json:"merged_files"`   // confdir 下被合并的 *.json 数量
-	BackupDir    string `json:"backup_dir"`     // confdir 备份位置(<confdir>/.mmwx-bak-<ts>)
-	Restarted    bool   `json:"restarted"`      // xray 是否重启成功
-	Message      string `json:"message"`
+	Success     bool   `json:"success"`
+	Detected    bool   `json:"detected"`     // 是否检测到正在跑的外置 xray(及配置路径)
+	ConfigPath  string `json:"config_path"`  // 合并后写入的 config 路径
+	ConfDir     string `json:"conf_dir"`     // 检测到的 confdir(可能为空)
+	MergedFiles int    `json:"merged_files"` // confdir 下被合并的 *.json 数量
+	BackupDir   string `json:"backup_dir"`   // confdir 备份位置(<confdir>/.mmwx-bak-<ts>)
+	Restarted   bool   `json:"restarted"`    // xray 是否重启成功
+	Message     string `json:"message"`
 }
 
 // HandleTakeoverExternalXray 由主控调用,触发"合并 confdir + 重启"动作。
 func (h *ManageHandler) HandleTakeoverExternalXray(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	if err := h.ensureInboundMutationFencesLocked(); err != nil {
+		writeError(w, http.StatusConflict, "Xray takeover blocked: "+err.Error())
 		return
 	}
 
@@ -70,7 +76,7 @@ func (h *ManageHandler) HandleTakeoverExternalXray(w http.ResponseWriter, r *htt
 	}
 
 	// 重启 xray(embedded 模式走 embedded restart;external 走 systemctl 等)
-	restartErr := h.RestartXray()
+	restartErr := h.restartXrayLocked()
 	resp := takeoverExternalXrayResp{
 		Success:     true,
 		Detected:    true,
