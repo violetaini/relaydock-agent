@@ -49,6 +49,12 @@ curl -sL https://raw.githubusercontent.com/violetaini/relaydock-agent/main/insta
 <details>
 <summary>更新日志</summary>
 
+### v0.4.5 (2026-07-28)
+- 支持复用系统已有 Nginx，并以独立 include 文件隔离面板配置
+- 支持 Ookla Speedtest、完整卸载、防火墙同步和入站并发保护
+- 升级前校验稳定版本与 Ed25519 签名，拒绝降级或未签名文件
+- 合并上游 v0.4.2 之后的 Mieru、CDN、日志和系统信息改进
+
 ### v0.4.2 (2026-07-26)
 - 🌈 增加cdn更新
 - 🌈 支持mieru协议

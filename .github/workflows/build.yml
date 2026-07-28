@@ -39,7 +39,14 @@ jobs:
       # 这里把 fork 克隆到该相对位置(与 checkout 出来的仓库同级)。fork 的 module 名仍是
       # github.com/xtls/xray-core,所以只能相对路径 replace,不能用 git 版本 replace。
       - name: Clone xray-core fork (vision limiter)
-        run: git clone --depth 1 https://github.com/iluobei/Xray-core-mmwx.git ../xray-core-vision-limiter
+        env:
+          XRAY_COMMIT: d3fdae5833a92070414db588ee9893264147b789
+        run: |
+          git init ../xray-core-vision-limiter
+          git -C ../xray-core-vision-limiter remote add origin https://github.com/iluobei/Xray-core-mmwx.git
+          git -C ../xray-core-vision-limiter fetch --depth 1 origin "$XRAY_COMMIT"
+          git -C ../xray-core-vision-limiter checkout --detach "$XRAY_COMMIT"
+          test "$(git -C ../xray-core-vision-limiter rev-parse HEAD)" = "$XRAY_COMMIT"
 
       - name: Go mod download
         run: go mod download
@@ -72,7 +79,14 @@ jobs:
       # xray-core fork 必须在 ../xray-core-vision-limiter (跟 build job 同款相对路径 replace 要求)
       # docker build 用 --build-context xray-core-fork=<...> 把 fork 注入 build context
       - name: Clone xray-core fork (vision limiter)
-        run: git clone --depth 1 https://github.com/iluobei/Xray-core-mmwx.git ../xray-core-vision-limiter
+        env:
+          XRAY_COMMIT: d3fdae5833a92070414db588ee9893264147b789
+        run: |
+          git init ../xray-core-vision-limiter
+          git -C ../xray-core-vision-limiter remote add origin https://github.com/iluobei/Xray-core-mmwx.git
+          git -C ../xray-core-vision-limiter fetch --depth 1 origin "$XRAY_COMMIT"
+          git -C ../xray-core-vision-limiter checkout --detach "$XRAY_COMMIT"
+          test "$(git -C ../xray-core-vision-limiter rev-parse HEAD)" = "$XRAY_COMMIT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
