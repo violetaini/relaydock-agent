@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -20,6 +21,7 @@ type Config struct {
 	ConnectionMode        string        `yaml:"connection_mode"`
 	ListenPort            string        `yaml:"listen_port"`
 	XrayMode              string        `yaml:"xray_mode"` // "external" (default) or "embedded"
+	NginxMode             string        `yaml:"nginx_mode"` // "managed" (default) or "reuse_existing"
 	StealMode             string        `yaml:"steal_mode"` // "", "tunnel", "fallback"
 	XrayServers           []XrayServer  `yaml:"xray_servers"`
 	TrafficReportInterval time.Duration `yaml:"traffic_report_interval"`
@@ -70,6 +72,7 @@ func fromEnvRaw() *Config {
 		ConnectionMode: os.Getenv("MMWX_CONNECTION_MODE"),
 		ListenPort:     os.Getenv("MMWX_LISTEN_PORT"),
 		XrayMode:       os.Getenv("MMWX_XRAY_MODE"),
+		NginxMode:      os.Getenv("MMWX_NGINX_MODE"),
 		RestartMethod:   os.Getenv("MMWX_RESTART_METHOD"),
 		RestartCommand:  os.Getenv("MMWX_RESTART_COMMAND"),
 		MasterPublicKey: os.Getenv("MMWX_MASTER_PUBLIC_KEY"),
@@ -131,6 +134,9 @@ func (c *Config) Merge(env *Config) {
 	if env.XrayMode != "" {
 		c.XrayMode = env.XrayMode
 	}
+	if env.NginxMode != "" {
+		c.NginxMode = env.NginxMode
+	}
 	if len(env.XrayServers) > 0 {
 		c.XrayServers = env.XrayServers
 	}
@@ -177,6 +183,9 @@ func (c *Config) applyDefaults() {
 	if c.XrayMode == "" {
 		c.XrayMode = "external"
 	}
+	if c.NginxMode == "" {
+		c.NginxMode = constants.NginxModeManaged
+	}
 	if c.LogPath == "" {
 		c.LogPath = DefaultLogPath
 	}
@@ -207,6 +216,9 @@ func (c *Config) discoverXrayServers() []XrayServer {
 
 // 校验配置是否合法。
 func (c *Config) Validate() error {
+	if c.NginxMode != constants.NginxModeManaged && c.NginxMode != constants.NginxModeReuseExisting {
+		return fmt.Errorf("nginx_mode must be %q or %q", constants.NginxModeManaged, constants.NginxModeReuseExisting)
+	}
 	if c.ConnectionMode != constants.ConnectionModePull && c.Token == "" {
 		// 兼容空 token，实际仅拉取模式可正常工作
 	}

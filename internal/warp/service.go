@@ -34,9 +34,9 @@ type State struct {
 
 // Service 持有 state 缓存 + 持久化路径。线程安全(mu 锁)。
 type Service struct {
-	mu        sync.RWMutex
-	path      string // warp.json 持久化路径
-	state     *State // nil 表示未注册
+	mu    sync.RWMutex
+	path  string // warp.json 持久化路径
+	state *State // nil 表示未注册
 }
 
 // NewService 用指定工作目录初始化;启动时尝试从磁盘加载状态。
@@ -157,18 +157,20 @@ func (s *Service) SetLicense(ctx context.Context, license string) (*State, error
 }
 
 // Uninstall 注销 Cloudflare 账号 + 删本地状态文件。
-// 即使 Cloudflare 端调用失败也清本地(避免用户被 stuck)。
+// 远端注销失败时保留凭证，确保调用方可以重试；404 由 Delete 视为已注销。
 func (s *Service) Uninstall(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == nil {
 		return nil
 	}
-	_ = Delete(ctx, s.state.DeviceID, s.state.AccessToken)
-	s.state = nil
+	if err := Delete(ctx, s.state.DeviceID, s.state.AccessToken); err != nil {
+		return fmt.Errorf("warp: unregister device: %w", err)
+	}
 	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("warp: remove state file: %w", err)
 	}
+	s.state = nil
 	return nil
 }
 

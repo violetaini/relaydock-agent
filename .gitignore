@@ -44,3 +44,6 @@ CLAUDE.md
 sign-local.sh.example
 sign-local.sh
 *_test.go
+!internal/agent/nginx_mode_test.go
+!internal/handler/nginx_reuse_test.go
+!internal/handler/nginx_reuse_integration_test.go

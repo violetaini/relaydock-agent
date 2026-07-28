@@ -26,6 +26,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"mmw-agent/internal/agent"
+	"mmw-agent/internal/agentfirewall"
 	"mmw-agent/internal/config"
 	"mmw-agent/internal/constants"
 	"mmw-agent/internal/discovery"
@@ -167,7 +168,19 @@ func main() {
 
 	configPath := flag.String("config", "", "Path to config file")
 	configPathShort := flag.String("c", "", "Path to config file (shorthand)")
+	firewallRulesPath := flag.String("arcway-firewall-rules", "", "Print public Xray inbound firewall rules and exit")
 	flag.Parse()
+	if *firewallRulesPath != "" {
+		rules, err := agentfirewall.RulesFromFile(*firewallRulesPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "derive Xray inbound firewall rules: %v\n", err)
+			os.Exit(1)
+		}
+		for _, rule := range rules {
+			fmt.Printf("%s %d\n", rule.Protocol, rule.Port)
+		}
+		return
+	}
 
 	// 仅在 -config 未设置时使用 -c
 	cfgFile := *configPath
@@ -217,7 +230,9 @@ func main() {
 	// 创建处理器
 	manageHandler := handler.NewManageHandler(cfg.Token, cfg.RestartMethod, cfg.RestartCommand)
 	manageHandler.SetConfigPath(cfgFile)
+	manageHandler.SetMasterURL(cfg.MasterURL)
 	manageHandler.SetXrayMode(cfg.XrayMode)
+	manageHandler.SetNginxMode(cfg.NginxMode)
 
 	// WARP 服务 — 状态文件 warp.json 跟 config.yaml 同目录(空 cfgFile 时用当前工作目录)
 	warpWorkDir := "."
@@ -325,11 +340,13 @@ func main() {
 
 	// 创建 agent 客户端
 	agentClient := agent.NewClient(cfg)
+	agentClient.SetConfigPath(cfgFile)
 	if embeddedXray != nil {
 		agentClient.SetEmbeddedXray(embeddedXray)
 	}
 	// 注入 WARP 状态查询回调,让 auth/heartbeat 上报 warp_installed
 	agentClient.SetWarpStatusFn(warpService.IsInstalled)
+	agentClient.SetNginxModeHook(manageHandler.SetNginxMode)
 	manageHandler.OnEmbeddedXrayStart(func(ex *embedded.EmbeddedXray) {
 		agentClient.SetEmbeddedXray(ex)
 	})
@@ -819,6 +836,7 @@ func initXrayConfig(path string, stealMode string) {
 //     (api 是 gRPC 命令通道、tunnel-in 是 reality 443 的 TLS 入站,都只能 tcp,跳过。)
 //   - 转发出站(protocol freedom,tag 以 "tunnel-" 开头):domainStrategy 若为 UseIP* 则改 AsIs。
 //     UseIP 会按包重解析目标 → UDP 退化成对称 NAT;AsIs 不重解析,保住 full-cone。
+//
 // 仅在有改动时写回,避免每次启动无谓写盘。
 func patchTunnelForwardUDPFullcone(path string) {
 	data, err := os.ReadFile(path)

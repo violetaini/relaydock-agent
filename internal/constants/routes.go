@@ -29,18 +29,19 @@ const (
 	// PathChildNginxServersList 列出 setup-ssl 实际写入的 servers/ 目录里所有 *.conf,
 	// 用于前端在 wss 提交前检测目标域名是否已被(reality / 旧 wss)占用。
 	PathChildNginxServersList = "/api/child/nginx/servers-list"
-	PathChildDomainProbe       = "/api/child/domains/latency"
-	PathChildNginxClearStream  = "/api/child/nginx/clear-stream-port"
-	PathChildValidateSite      = "/api/child/validate-site"
-	PathChildLimiter           = "/api/child/limiter"
-	PathChildSwitchXrayMode    = "/api/child/agent/switch-xray-mode"
-	PathChildSwitchListenPort  = "/api/child/agent/switch-listen-port"
-	PathChildUpdateMasterURL   = "/api/child/agent/update-master-url"
-	PathChildTakeoverXray      = "/api/child/external-xray/takeover"
+	PathChildDomainProbe      = "/api/child/domains/latency"
+	PathChildNginxClearStream = "/api/child/nginx/clear-stream-port"
+	PathChildValidateSite     = "/api/child/validate-site"
+	PathChildLimiter          = "/api/child/limiter"
+	PathChildSwitchXrayMode   = "/api/child/agent/switch-xray-mode"
+	PathChildSwitchListenPort = "/api/child/agent/switch-listen-port"
+	PathChildUpdateMasterURL  = "/api/child/agent/update-master-url"
+	PathChildAgentUninstallV2 = "/api/child/agent/uninstall-v2"
+	PathChildTakeoverXray     = "/api/child/external-xray/takeover"
 	// PathChildBatchApply 一次性提交多个 inbound add-client + routing rule add_user 改动,
 	// 在 inboundsMu 锁内单次读 config + 单次写盘 + per-inbound runtime apply 完成。
 	// 用于套餐绑用户场景:同台 server 上多个 routed 节点的所有改动合并成 1 次 round-trip。
-	PathChildBatchApply        = "/api/child/batch-apply"
+	PathChildBatchApply = "/api/child/batch-apply"
 
 	// WARP 出站管理 — 每个 agent 各自注册 Cloudflare WARP 账号,本机 xray 双 outbound(warp-v4/warp-v6)
 	PathChildWarpInstall = "/api/child/warp/install"
@@ -48,6 +49,8 @@ const (
 	PathChildWarpLicense = "/api/child/warp/license"
 	PathChildWarpRemove  = "/api/child/warp/remove"
 )
+
+const CapabilityAgentUninstallV2 = "agent_uninstall_v2"
 
 const (
 	PathChildXrayInstallStream    = "/api/child/xray/install-stream"

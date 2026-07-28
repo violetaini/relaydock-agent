@@ -50,6 +50,7 @@ const (
 // Client 表示连接主控端的 agent 客户端。
 type Client struct {
 	config      *config.Config
+	configPath  string
 	collector   *collector.Collector
 	xrayServers []config.XrayServer
 	wsConn      *websocket.Conn
@@ -120,6 +121,10 @@ type Client struct {
 	// 供 master 显示 server 卡片的 W 图标 badge。nil = 老 agent / 未注入 → 上报 false。
 	warpStatusFn func() bool
 
+	// nginxModeHook keeps the HTTP management handler's ownership boundary in
+	// sync with a control-plane nginx_mode update.
+	nginxModeHook func(string)
+
 	// 端口隐身钩子:WS 鉴权成功 → onWSConnected(主程序据此延迟关闭入站监听,隐藏端口);
 	// WS 断开 → onWSDisconnected(主程序立即重开监听,保证主控 HTTP/pull 回退可达)。
 	// nil = 未启用该特性 → 监听始终常开,行为同旧版。
@@ -142,6 +147,16 @@ func (c *Client) SetRPCMux(mux *http.ServeMux) {
 // SetWarpStatusFn 注入"查 WARP 是否已注册"的回调,auth / heartbeat 上报用。
 func (c *Client) SetWarpStatusFn(fn func() bool) {
 	c.warpStatusFn = fn
+}
+
+// SetNginxModeHook receives validated nginx_mode changes from the control plane.
+func (c *Client) SetNginxModeHook(fn func(string)) {
+	c.nginxModeHook = fn
+}
+
+// SetConfigPath identifies the active YAML file used for persisted control-plane updates.
+func (c *Client) SetConfigPath(path string) {
+	c.configPath = path
 }
 
 // getPublicIPv4 / getPublicIPv6 是 ipMu 保护的读取器,供 auth / heartbeat 调用。
@@ -585,12 +600,9 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 		"public_ipv4":    publicIPv4,
 		"public_ipv6":    publicIPv6,
 		"warp_installed": warpInstalled,
-		"agent_version":  version.Version, // 主控经 WS auth 直接拿版本,不再反向 HTTP 拉 /api/child/system/info(端口隐身后仍可显示)
+		"agent_version":  version.Version,   // 主控经 WS auth 直接拿版本,不再反向 HTTP 拉 /api/child/system/info(端口隐身后仍可显示)
 		"xray_mode":      c.config.XrayMode, // 上报当前运行模式,主控据此校正 embedded→external 漂移(license 恢复后自动拉回 embedded)
-		"capabilities": map[string]bool{
-			"rpc":    rpcAvailable,
-			"stream": rpcAvailable,
-		},
+		"capabilities":   advertisedCapabilities(rpcAvailable, util.SupportsAgentUninstallV2()),
 	})
 
 	msg := map[string]interface{}{
@@ -626,6 +638,14 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 	}
 
 	return nil
+}
+
+func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported bool) map[string]bool {
+	return map[string]bool{
+		"rpc":                                rpcAvailable,
+		"stream":                             rpcAvailable,
+		constants.CapabilityAgentUninstallV2: agentUninstallV2Supported,
+	}
 }
 
 // 执行 WS 密钥交换。
@@ -2327,6 +2347,22 @@ func (c *Client) sendScanResult(conn *websocket.Conn) {
 }
 
 func (c *Client) handleConfigUpdate(updates map[string]string) {
+	if nginxMode, ok := updates["nginx_mode"]; ok && nginxMode != c.config.NginxMode {
+		switch nginxMode {
+		case constants.NginxModeManaged, constants.NginxModeReuseExisting:
+			if err := c.persistConfigField("nginx_mode", nginxMode); err != nil {
+				log.Printf("[Agent] Failed to persist nginx_mode: %v", err)
+			} else {
+				c.config.NginxMode = nginxMode
+				if c.nginxModeHook != nil {
+					c.nginxModeHook(nginxMode)
+				}
+				log.Printf("[Agent] Updated nginx_mode to %q", nginxMode)
+			}
+		default:
+			log.Printf("[Agent] Ignoring invalid nginx_mode update %q", nginxMode)
+		}
+	}
 	if stealMode, ok := updates["steal_mode"]; ok && stealMode != c.config.StealMode {
 		c.config.StealMode = stealMode
 		if err := c.persistConfigField("steal_mode", stealMode); err != nil {
@@ -2374,7 +2410,10 @@ func (c *Client) persistConfigField(key, value string) error {
 	if !util.NoControlChars(value) {
 		return fmt.Errorf("persistConfigField: 字段 %q 的值含非法控制字符,拒绝写入", key)
 	}
-	cfgPath := "/etc/mmw-agent/config.yaml"
+	cfgPath := c.configPath
+	if cfgPath == "" {
+		cfgPath = "/etc/mmw-agent/config.yaml"
+	}
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		return nil
 	}
