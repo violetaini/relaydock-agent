@@ -1,0 +1,52 @@
+# ---> Go
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# 本地升级签名脚本(含 Ed25519 私钥,切勿提交);模板见 sign-local.sh.example
+sign-local.sh
+
+traffic-info-*
+.claude 
+build
+
+internal/web/dist
+data/*
+.vscode
+VERSION.md
+miaomiaowu.db
+miaomiaowux-frontend/.vite
+.idea
+VALIDATION_INTEGRATION_PLAN.md
+CLAUDE.md
+sign-local.sh.example
+sign-local.sh
+*_test.go
+!internal/agent/nginx_mode_test.go
+!internal/handler/nginx_reuse_test.go
+!internal/handler/nginx_reuse_integration_test.go
+!internal/handler/nginx_mode_switch_test.go
+!internal/handler/agent_upgrade_guard_test.go
+!internal/version/compare_test.go

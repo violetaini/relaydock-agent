@@ -1,0 +1,93 @@
+name: Publish to R2 CDN
+
+# 发版后把 agent 二进制 + version.json 推到 Cloudflare R2,供主控的 agent 版本检查/下载走 CDN
+# (绕开 api.github.com 限流)。触发:GitHub Release 发布时。
+# 需要的 Secrets(与主面板仓同名,可用 Organization Secrets 共享一份):
+#   R2_ACCOUNT_ID        Cloudflare 账号 ID
+#   R2_ACCESS_KEY_ID     R2 API Token 的 Access Key ID
+#   R2_SECRET_ACCESS_KEY R2 API Token 的 Secret Access Key
+#   R2_BUCKET            R2 bucket 名(与面板同一个 bucket 即可)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '手动补传的 release tag(如 v1.2.3)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Push agent binaries + version.json to R2
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      NOTES: ${{ github.event.release.body }}
+      URL: ${{ github.event.release.html_url }}
+      PROJECT: mmw-agent
+    steps:
+      - name: Download release assets (mmw-agent-*) — 等 build.yml 传完再下,避免竞态
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          # publish-cdn 与 build.yml 都由 release:published 触发,本步可能抢在 build.yml 上传二进制
+          # 之前跑 → "no assets to download" 直接失败(R2 一片空)。这里重试等待资产出现(最多 ~10min)。
+          for i in $(seq 1 40); do
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'mmw-agent-*' --dir dist 2>/dev/null; then
+              echo "第 $i 次尝试:资产已下载"
+              break
+            fi
+            echo "第 $i 次尝试:资产还没就绪,等 15s 再试..."
+            sleep 15
+          done
+          ls -la dist
+          if ! ls dist/mmw-agent-* >/dev/null 2>&1; then
+            echo "::error::等待超时:release $TAG 仍无 mmw-agent-* 资产(build.yml 可能失败或资产命名变了)"
+            exit 1
+          fi
+
+      - name: Generate version.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 手动补传(workflow_dispatch)时没有 release event,NOTES/URL 为空 → 从 gh 补取。
+          if [ -z "${NOTES:-}" ]; then
+            NOTES=$(gh release view "$TAG" --repo "${{ github.repository }}" --json body --jq '.body' 2>/dev/null || echo "")
+          fi
+          if [ -z "${URL:-}" ]; then
+            URL=$(gh release view "$TAG" --repo "${{ github.repository }}" --json url --jq '.url' 2>/dev/null || echo "")
+          fi
+          jq -n \
+            --arg version "$TAG" \
+            --arg tag "$TAG" \
+            --arg notes "${NOTES:-}" \
+            --arg html_url "${URL:-}" \
+            '{version:$version, tag:$tag, notes:$notes, html_url:$html_url}' > dist/version.json
+          cat dist/version.json
+
+      - name: Upload to R2 (S3-compatible)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          for f in dist/mmw-agent-*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            aws s3 cp "$f" "s3://$BUCKET/$PROJECT/$name" \
+              --endpoint-url "$R2_ENDPOINT" \
+              --content-type application/octet-stream \
+              --cache-control "public, max-age=86400"
+          done
+          aws s3 cp dist/version.json "s3://$BUCKET/$PROJECT/version.json" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/json \
+            --cache-control "public, max-age=60"
+          echo "已发布到 R2: $PROJECT/ (tag=$TAG)"

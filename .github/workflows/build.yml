@@ -1,0 +1,197 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: mmw-agent-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: mmw-agent-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            output: mmw-agent-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: mmw-agent-darwin-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # go.mod 用相对路径 replace github.com/xtls/xray-core => ../xray-core-vision-limiter,
+      # 这里把 fork 克隆到该相对位置(与 checkout 出来的仓库同级)。fork 的 module 名仍是
+      # github.com/xtls/xray-core,所以只能相对路径 replace,不能用 git 版本 replace。
+      - name: Clone xray-core fork (vision limiter)
+        env:
+          XRAY_COMMIT: d3fdae5833a92070414db588ee9893264147b789
+        run: |
+          git init ../xray-core-vision-limiter
+          git -C ../xray-core-vision-limiter remote add origin https://github.com/iluobei/Xray-core-mmwx.git
+          git -C ../xray-core-vision-limiter fetch --depth 1 origin "$XRAY_COMMIT"
+          git -C ../xray-core-vision-limiter checkout --detach "$XRAY_COMMIT"
+          test "$(git -C ../xray-core-vision-limiter rev-parse HEAD)" = "$XRAY_COMMIT"
+
+      - name: Go mod download
+        run: go mod download
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags="-s -w" -o build/${{ matrix.output }} ./cmd/mmw-agent
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: build/${{ matrix.output }}
+          retention-days: 7
+
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # xray-core fork 必须在 ../xray-core-vision-limiter (跟 build job 同款相对路径 replace 要求)
+      # docker build 用 --build-context xray-core-fork=<...> 把 fork 注入 build context
+      - name: Clone xray-core fork (vision limiter)
+        env:
+          XRAY_COMMIT: d3fdae5833a92070414db588ee9893264147b789
+        run: |
+          git init ../xray-core-vision-limiter
+          git -C ../xray-core-vision-limiter remote add origin https://github.com/iluobei/Xray-core-mmwx.git
+          git -C ../xray-core-vision-limiter fetch --depth 1 origin "$XRAY_COMMIT"
+          git -C ../xray-core-vision-limiter checkout --detach "$XRAY_COMMIT"
+          test "$(git -C ../xray-core-vision-limiter rev-parse HEAD)" = "$XRAY_COMMIT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # --build-context 把 ../xray-core-vision-limiter 作为额外 context 注入,
+          # Dockerfile 内 COPY --from=xray-core-fork . /build/xray-core-vision-limiter 解构
+          build-contexts: |
+            xray-core-fork=../xray-core-vision-limiter
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Add executable permissions
+        run: |
+          chmod +x release/mmw-agent-linux-amd64
+          chmod +x release/mmw-agent-linux-arm64
+          chmod +x release/mmw-agent-darwin-amd64
+          chmod +x release/mmw-agent-darwin-arm64
+
+      - name: Create checksums
+        run: |
+          cd release
+          sha256sum mmw-agent-linux-amd64 > checksums.txt
+          sha256sum mmw-agent-linux-arm64 >> checksums.txt
+          sha256sum mmw-agent-darwin-amd64 >> checksums.txt
+          sha256sum mmw-agent-darwin-arm64 >> checksums.txt
+
+      - name: Setup Go (for signing)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # 用离线 Ed25519 私钥(GitHub secret)对每个二进制做分离签名,产出 <bin>.sig。
+      # agent 自更新时用内嵌公钥校验,私钥从不落主控 → 主控被攻破也签不出可被接受的木马 binary。
+      - name: Sign binaries
+        env:
+          AGENT_UPDATE_PRIVATE_KEY: ${{ secrets.AGENT_UPDATE_PRIVATE_KEY }}
+        run: |
+          cd tools/sign
+          go run . \
+            ../../release/mmw-agent-linux-amd64 \
+            ../../release/mmw-agent-linux-arm64 \
+            ../../release/mmw-agent-darwin-amd64 \
+            ../../release/mmw-agent-darwin-arm64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          # release.sh 已用自定义 changelog 创建 Release，这里只上传二进制，不覆盖说明
+          generate_release_notes: false
+          files: |
+            release/mmw-agent-linux-amd64
+            release/mmw-agent-linux-arm64
+            release/mmw-agent-darwin-amd64
+            release/mmw-agent-darwin-arm64
+            release/mmw-agent-linux-amd64.sig
+            release/mmw-agent-linux-arm64.sig
+            release/mmw-agent-darwin-amd64.sig
+            release/mmw-agent-darwin-arm64.sig
+            release/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

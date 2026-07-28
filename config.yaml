@@ -1,0 +1,32 @@
+# mmw-agent 配置示例
+
+# Master 服务器地址 (WebSocket/HTTP 模式需要)
+master_url: "http://localhost:8080"
+
+# 认证令牌 (从 master 服务器获取)
+token: "xWAvZ5qOuhOGBa4jtkuOE9IukqIJgRepKtcUiHD9Qoc="
+
+# 连接模式: auto | websocket | http | pull
+# - auto: 自动选择最佳模式 (WebSocket -> HTTP -> Pull)
+# - websocket: 仅使用 WebSocket 长连接
+# - http: 仅使用 HTTP 推送
+# - pull: 仅提供 API 供 master 拉取
+connection_mode: "auto"
+
+# HTTP 监听端口 (Pull 模式和管理 API)
+listen_port: "23889"
+
+# 流量上报间隔
+traffic_report_interval: 1m
+
+# 速度上报间隔
+speed_report_interval: 3s
+
+# Xray 服务器配置 (可选)
+# 如果不配置，将自动扫描以下路径:
+# - /usr/local/etc/xray/config.json
+# - /etc/xray/config.json
+# - /opt/xray/config.json
+xray_servers:
+  - name: "primary"
+    config_path: "/usr/local/etc/xray/config.json"

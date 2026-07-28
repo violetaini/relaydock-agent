@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package mmw.app.dispatcher;
+option go_package = "mmw-agent/internal/dispatcher";
+
+message SessionConfig {
+  reserved 1;
+}
+
+message Config {
+  SessionConfig settings = 1;
+}
