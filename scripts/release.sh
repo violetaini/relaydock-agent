@@ -9,7 +9,8 @@
 #
 # 说明：mmw-agent 无前端/package.json。版本号同步到 internal/version/version.go(运行时上报)
 # 和 git tag(GitHub release / 升级脚本拉 latest 用)。
-# 推送 tag 后由 .github/workflows/build.yml 自动编译 4 个平台二进制并上传到本 Release。
+# 推送 tag 不会自动构建。只有执行本发布脚本时，才会显式触发 GitHub 工作流，
+# 编译 4 个平台二进制并上传到本 Release。
 
 set -e
 
@@ -130,7 +131,7 @@ echo "[5/6] 推送到远程..."
 git push origin main
 git push origin "v${NEW_VERSION}"
 
-# 6. 创建 GitHub Release（二进制由 GitHub Action 在 tag 推送后自动编译并上传）
+# 6. 创建 GitHub Release，并显式触发本次发布所需的 GitHub 构建
 echo "[6/6] 创建 GitHub Release..."
 RELEASE_BODY="## 更新日志
 
@@ -147,7 +148,12 @@ gh release create "v${NEW_VERSION}" \
   --title "v${NEW_VERSION}" \
   --notes "$RELEASE_BODY"
 
+gh workflow run build.yml \
+  --repo "$REPO" \
+  --ref "v${NEW_VERSION}" \
+  -f publish=true
+
 echo ""
 echo "=== 发布完成! v${NEW_VERSION} ==="
 echo "  Release: https://github.com/${REPO}/releases/tag/v${NEW_VERSION}"
-echo "  GitHub Action 将自动编译二进制并上传到该 Release"
+echo "  已按本次发布请求显式启动 GitHub 二进制构建"

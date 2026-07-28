@@ -2,9 +2,12 @@ name: Build and Release
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+    inputs:
+      publish:
+        description: Publish the Docker image and tagged GitHub Release
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -68,6 +71,7 @@ jobs:
 
   docker:
     name: Build and Push Docker Image
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -130,7 +134,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ inputs.publish && startsWith(github.ref, 'refs/tags/v') }}
     permissions:
       contents: write
     steps:
