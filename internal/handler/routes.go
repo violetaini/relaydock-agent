@@ -43,6 +43,7 @@ func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandl
 	mux.HandleFunc(constants.PathChildValidateSite, manageHandler.HandleValidateSite)
 	mux.HandleFunc(constants.PathChildLimiter, manageHandler.HandleLimiter)
 	mux.HandleFunc(constants.PathChildSwitchXrayMode, manageHandler.HandleSwitchXrayMode)
+	mux.HandleFunc(constants.PathChildSwitchNginxMode, manageHandler.HandleSwitchNginxMode)
 	mux.HandleFunc(constants.PathChildSwitchListenPort, manageHandler.HandleSwitchListenPort)
 	mux.HandleFunc(constants.PathChildUpdateMasterURL, manageHandler.HandleUpdateMasterURL)
 	mux.HandleFunc(constants.PathChildAgentUninstallV2, manageHandler.HandleAgentUninstallV2)

@@ -49,6 +49,9 @@ curl -sL https://raw.githubusercontent.com/violetaini/relaydock-agent/main/insta
 <details>
 <summary>更新日志</summary>
 
+### v0.4.6 (2026-07-28)
+- Nginx 管理模式改为可确认的远程切换，配置落盘成功后才向主控返回
+
 ### v0.4.5 (2026-07-28)
 - 支持复用系统已有 Nginx，并以独立 include 文件隔离面板配置
 - 支持 Ookla Speedtest、完整卸载、防火墙同步和入站并发保护
