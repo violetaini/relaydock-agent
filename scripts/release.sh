@@ -1,6 +1,6 @@
 #!/bin/bash
 # RelayDock Agent 一键发布脚本
-# 流程：bump version -> 更新 README changelog -> commit -> tag -> push -> 创建 GitHub Release
+# 流程：bump version -> commit -> tag -> push -> 创建 GitHub Release
 # 用法：
 #   bash scripts/release.sh            # patch +1（默认）
 #   bash scripts/release.sh minor      # minor +1
@@ -39,7 +39,7 @@ if [ -z "$PREV_TAG" ]; then
 fi
 
 # 收集自上个 tag 以来的 commit messages（排除版本号 commit 和 merge commit）
-COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" --no-merges | grep -v "^- v[0-9]" | sort -u || true)
+COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" --no-merges | grep -Ev "^- (v|release: v)[0-9]" | sort -u || true)
 if [ -z "$COMMITS" ]; then
   echo "[SKIP] 没有新的 commit，跳过发布"
   exit 0
@@ -50,7 +50,7 @@ echo "$COMMITS"
 echo ""
 
 # 1. 计算新版本号
-echo "[1/6] 计算版本号..."
+echo "[1/5] 计算版本号..."
 CUR=${PREV_TAG#v}
 IFS='.' read -r MAJ MIN PAT <<< "$CUR"
 case "${1:-patch}" in
@@ -72,7 +72,7 @@ echo "  -> 新版本: v${NEW_VERSION}"
 
 # 2. 同步版本号到 internal/version/version.go
 # 主控通过 /api/child/system/info 拿这个常量比对 GitHub latest tag,不同步会导致 UI 显示老版本号 → 误判可升级
-echo "[2/6] 同步 version.go..."
+echo "[2/5] 同步 version.go..."
 VERSION_FILE="$PROJECT_ROOT/internal/version/version.go"
 if [ ! -f "$VERSION_FILE" ]; then
   echo "[ERROR] 未找到 ${VERSION_FILE}"
@@ -93,46 +93,21 @@ fi
 mv "$TMP_VER" "$VERSION_FILE"
 echo "  -> version.go 已更新为 ${NEW_VERSION}"
 
-# 3. 更新 README changelog
-echo "[3/6] 更新 README changelog..."
+# 3. 创建 commit 和 tag
 TODAY=$(date +%Y-%m-%d)
-
-TMPFILE=$(mktemp)
-echo "### v${NEW_VERSION} (${TODAY})" > "$TMPFILE"
-echo "$COMMITS" >> "$TMPFILE"
-echo "" >> "$TMPFILE"
-
-INSERT_LINE=$(grep -n '<summary>更新日志</summary>' "$PROJECT_ROOT/README.md" | head -1 | cut -d: -f1)
-if [ -z "$INSERT_LINE" ]; then
-  echo "[ERROR] README.md 中未找到 '<summary>更新日志</summary>' 锚点"
-  rm -f "$TMPFILE"
-  exit 1
-fi
-INSERT_LINE=$((INSERT_LINE + 1))
-
-{
-  head -n "$INSERT_LINE" "$PROJECT_ROOT/README.md"
-  cat "$TMPFILE"
-  tail -n +"$((INSERT_LINE + 1))" "$PROJECT_ROOT/README.md"
-} > "$PROJECT_ROOT/README.md.tmp"
-mv "$PROJECT_ROOT/README.md.tmp" "$PROJECT_ROOT/README.md"
-rm -f "$TMPFILE"
-echo "  -> README 已更新"
-
-# 4. commit + tag
-echo "[4/6] 创建 commit 和 tag..."
+echo "[3/5] 创建 commit 和 tag..."
 git add -A
-git commit -m "v${NEW_VERSION}" --no-verify
+git commit -m "release: v${NEW_VERSION}" --no-verify
 git tag "v${NEW_VERSION}"
 echo "  -> tag: v${NEW_VERSION}"
 
-# 5. push
-echo "[5/6] 推送到远程..."
+# 4. push
+echo "[4/5] 推送到远程..."
 git push origin main
 git push origin "v${NEW_VERSION}"
 
-# 6. 创建 GitHub Release，并显式触发本次发布所需的 GitHub 构建
-echo "[6/6] 创建 GitHub Release..."
+# 5. 创建 GitHub Release，并显式触发本次发布所需的 GitHub 构建
+echo "[5/5] 创建 GitHub Release..."
 RELEASE_BODY="## 更新日志
 
 ### v${NEW_VERSION} (${TODAY})
