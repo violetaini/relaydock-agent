@@ -7,7 +7,7 @@ package handler
 //   - 重启 xray(由调用方走的 mode 决定:embedded / external)
 //
 // 触发场景:从旧版面板迁移到 RelayDock 时,被旧版面板管理过的外置 xray 通常用
-// `-config FILE -confdir DIR` 多片配置启动;mmwx 主控的 /api/child/inbounds 等接口
+// `-config FILE -confdir DIR` 多片配置启动;RelayDock 主控的 /api/child/inbounds 等接口
 // 只读写单个 config 文件,如不合并就会出现"接口改的 client/inbound 丢失"。
 
 import (
@@ -30,7 +30,7 @@ type takeoverExternalXrayResp struct {
 	ConfigPath  string `json:"config_path"`  // 合并后写入的 config 路径
 	ConfDir     string `json:"conf_dir"`     // 检测到的 confdir(可能为空)
 	MergedFiles int    `json:"merged_files"` // confdir 下被合并的 *.json 数量
-	BackupDir   string `json:"backup_dir"`   // confdir 备份位置(<confdir>/.mmwx-bak-<ts>)
+	BackupDir   string `json:"backup_dir"`   // confdir 备份位置(<confdir>/.relaydock-bak-<ts>)
 	Restarted   bool   `json:"restarted"`    // xray 是否重启成功
 	Message     string `json:"message"`
 }
@@ -150,7 +150,7 @@ func MergeXrayConfdirInto(paths discovery.XrayPaths, targetPath string) (int, st
 
 			if mergedCount > 0 {
 				ts := time.Now().Format("20060102-150405")
-				backupDir = filepath.Join(paths.ConfDir, ".mmwx-bak-"+ts)
+				backupDir = filepath.Join(paths.ConfDir, ".relaydock-bak-"+ts)
 				if err := os.MkdirAll(backupDir, 0o755); err == nil {
 					for _, name := range jsonFiles {
 						src := filepath.Join(paths.ConfDir, name)

@@ -401,20 +401,8 @@ func (h *ManageHandler) authenticate(r *http.Request) bool {
 		return true
 	}
 
-	auth := r.Header.Get(constants.HeaderAuthorization)
-	if auth == "" {
-		auth = r.Header.Get(constants.HeaderMMRemoteToken)
-	}
-	if auth == "" {
-		return false
-	}
-
-	if strings.HasPrefix(auth, constants.BearerPrefix) {
-		token := strings.TrimPrefix(auth, constants.BearerPrefix)
-		return token == h.configToken
-	}
-
-	return auth == h.configToken
+	token, ok := strings.CutPrefix(r.Header.Get(constants.HeaderAuthorization), constants.BearerPrefix)
+	return ok && token == h.configToken
 }
 
 // 输出 JSON 响应。
@@ -1542,7 +1530,7 @@ var logServiceUnits = map[string]string{
 // HandleGetLogs 返回本机最近 N 行日志,供主控「Agent 日志」页展示。
 //
 //	service=agent → 读 agent 自身的日志文件(lumberjack,h.logPath)。这条路 systemd 与 Docker
-//	               部署都通,因为 agent 早已 log.SetOutput 到文件(见 cmd/mmw-agent 的 setupLogging)。
+//	               部署都通,因为 agent 早已 log.SetOutput 到文件(见 cmd/relaydock-agent 的 setupLogging)。
 //	service=xray/nginx → journalctl -u <unit>(白名单)。Docker 部署无 systemd → 返回明确提示。
 func (h *ManageHandler) HandleGetLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -2182,7 +2170,7 @@ func (h *ManageHandler) listInbounds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 老 mmw / 手写 xray config 里 inbound 可能没 tag,后续主控做 remove+add 时找不到 → 配置里残留旧 inbound 同端口 → xray 启动失败。
+	// 老 RelayDock / 手写 xray config 里 inbound 可能没 tag,后续主控做 remove+add 时找不到 → 配置里残留旧 inbound 同端口 → xray 启动失败。
 	// 不在内存里"虚拟一个 tag",而是直接把生成的 tag 写回到磁盘配置,把脏数据修干净,后续所有 remove/add 都按真实 tag 走。
 	// 整个 list 流程现在的"读"步骤会带轻量"写",但只在真的有 inbound 缺 tag 时才真改文件,常规情况无副作用。
 	h.promoteInboundTagsToConfig()
@@ -2359,7 +2347,7 @@ func mergeInboundClients(dst, src map[string]interface{}) {
 // promoteInboundTagsToConfig 扫所有 xray 配置(主 config + confdir),
 // 把缺 tag 但有 protocol+port 的 inbound 原地补 tag = "<protocol>-<port>",再 marshal 写回原文件。
 // 已有 tag 的不动;无 protocol/port 的(异常 inbound)也不动,避免破坏边界情况。
-// 失败只记日志不阻塞 — 拿不到 tag 比 mmwx 直接 panic 要好。
+// 失败只记日志不阻塞 — 拿不到 tag 比 RelayDock 直接 panic 要好。
 func (h *ManageHandler) promoteInboundTagsToConfig() {
 	paths := h.findXrayConfigInfo()
 	if paths.ConfigPath != "" {
@@ -2460,7 +2448,7 @@ func (h *ManageHandler) getInboundsFromConfig() []map[string]interface{} {
 	}
 
 	// confdir 下的所有 *.json — xray 启动时 -confdir 会把它们合并进配置,
-	// 老版 mmw 风格的服务器把每个 inbound 拆成单文件(如 Shadowsocks-25443.json)放这里。
+	// 老版 RelayDock 风格的服务器把每个 inbound 拆成单文件(如 Shadowsocks-25443.json)放这里。
 	// 不读 confdir 会导致这些 inbound 在 listInbounds 里只能从 gRPC 拿到 tag 而拿不到 settings/port/protocol,
 	// 进而让主控的 sync_inbounds 全部 skip 掉(no settings found)。
 	if paths.ConfDir != "" {
@@ -2483,7 +2471,7 @@ func (h *ManageHandler) getInboundsFromConfig() []map[string]interface{} {
 // readInboundsFromJSONFile 读单个 xray 风格 JSON 文件,返回其中 inbounds 数组(可能为空)。
 // 支持两种结构:
 //  1. 完整 xray 配置:{ "inbounds": [ ... ] }
-//  2. 单 inbound 文件:{ "tag": "...", "port": ..., "protocol": ..., "settings": {...} } — 老 mmw confdir 常用
+//  2. 单 inbound 文件:{ "tag": "...", "port": ..., "protocol": ..., "settings": {...} } — 老 RelayDock confdir 常用
 func readInboundsFromJSONFile(path string) []map[string]interface{} {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -4555,7 +4543,7 @@ func (h *ManageHandler) removeInboundFromConfigAtPath(configPath, tag string) er
 			continue // 精确匹配 → 删
 		}
 		// listInbounds 会给 tag 缺失的 inbound 虚拟一个 `<protocol>-<port>` tag 让前端能引用,
-		// remove 时也要识别这种虚拟 tag,否则原 inbound 永远删不掉 → mmwx 再 add 一份 → 同端口两份 inbound → xray 启动失败
+		// remove 时也要识别这种虚拟 tag,否则原 inbound 永远删不掉 → RelayDock 再 add 一份 → 同端口两份 inbound → xray 启动失败
 		if ibTag == "" {
 			proto, _ := inbound["protocol"].(string)
 			port := 0
@@ -6039,15 +6027,15 @@ func (h *ManageHandler) HandleAgentUpgradeStream(w http.ResponseWriter, r *http.
 	log.Printf("[Manage] Starting Agent upgrade (stream) to %s...", releaseTag)
 	// 升级流程:
 	//   1. 脚本里只做"下载 + 校验 + 替换二进制",不再嵌入 `systemctl restart`
-	//      (旧实现把 systemctl restart 放在 nohup bash 里,bash 在 mmw-agent.service 的 cgroup,
+	//      (旧实现把 systemctl restart 放在 nohup bash 里,bash 在 relaydock-agent.service 的 cgroup,
 	//       systemd 杀 cgroup 时把 bash 也杀掉,/tmp 文件不会清理,且偶发不重启 — 见 port/xray_mode 切换
 	//       同款问题的修复)
 	//   2. 脚本退出 → sseStreamCmd 收到 complete → goroutine 里 os.Exit(0)
-	//   3. systemd Restart=always 拉起新二进制(/usr/local/bin/mmw-agent 已经被脚本里的 cp 覆盖)
+	//   3. systemd Restart=always 拉起新二进制(/usr/local/bin/relaydock-agent 已经被脚本里的 cp 覆盖)
 	script := `
 set -e
 echo "=========================================="
-echo "  MMW-Agent Upgrade"
+echo "  RelayDock Agent Upgrade"
 echo "=========================================="
 
 ARCH=$(uname -m)
@@ -6063,9 +6051,9 @@ esac
 # 纯 v6 机器(如澳门 Debee mo-d.2ha.me)直连 github 会 "network is unreachable" → 会快速失败(近乎即时,
 # 非超时)后降级到 ghproxy / gh-proxy(v4+v6 双栈反代)。
 MIRRORS=(
-    "https://github.com/violetaini/relaydock-agent/releases/download/__AGENT_RELEASE_TAG__/mmw-agent-linux-${ARCH_NAME}"
-    "https://gh-proxy.com/https://github.com/violetaini/relaydock-agent/releases/download/__AGENT_RELEASE_TAG__/mmw-agent-linux-${ARCH_NAME}"
-    "https://mirror.ghproxy.com/https://github.com/violetaini/relaydock-agent/releases/download/__AGENT_RELEASE_TAG__/mmw-agent-linux-${ARCH_NAME}"
+    "https://github.com/violetaini/relaydock-agent/releases/download/__AGENT_RELEASE_TAG__/relaydock-agent-linux-${ARCH_NAME}"
+    "https://gh-proxy.com/https://github.com/violetaini/relaydock-agent/releases/download/__AGENT_RELEASE_TAG__/relaydock-agent-linux-${ARCH_NAME}"
+    "https://mirror.ghproxy.com/https://github.com/violetaini/relaydock-agent/releases/download/__AGENT_RELEASE_TAG__/relaydock-agent-linux-${ARCH_NAME}"
 )
 # 优先 curl,没有就用 wget;两者都没就按发行版包管理器装一个 — 跟 install.sh 同款逻辑
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
@@ -6100,7 +6088,7 @@ dl() { # dl <url> <outfile>
 download_ok=0
 for url in "${MIRRORS[@]}"; do
     echo "Downloading from $url ..."
-    if dl "$url" /tmp/mmw-agent-new && dl "${url}.sig" /tmp/mmw-agent-new.sig; then
+    if dl "$url" /tmp/relaydock-agent-new && dl "${url}.sig" /tmp/relaydock-agent-new.sig; then
         download_ok=1
         break
     fi
@@ -6111,28 +6099,28 @@ if [ "$download_ok" != "1" ]; then
     exit 1
 fi
 
-chmod +x /tmp/mmw-agent-new
-echo "Download complete, binary size: $(du -h /tmp/mmw-agent-new | cut -f1)"
+chmod +x /tmp/relaydock-agent-new
+echo "Download complete, binary size: $(du -h /tmp/relaydock-agent-new | cut -f1)"
 
 # 签名校验:用【当前正在运行】的 agent 内嵌公钥校验新二进制,通过才替换。
 # 私钥离线(GitHub secret / 本地未提交脚本),主控与本仓库都没有 → 主控被攻破也签不出能过校验的二进制。
-SELF_BIN="$(command -v mmw-agent || echo /usr/local/bin/mmw-agent)"
+SELF_BIN="$(command -v relaydock-agent || echo /usr/local/bin/relaydock-agent)"
 echo "Verifying signature ..."
-if ! "$SELF_BIN" __verify-update /tmp/mmw-agent-new /tmp/mmw-agent-new.sig; then
+if ! "$SELF_BIN" __verify-update /tmp/relaydock-agent-new /tmp/relaydock-agent-new.sig; then
     echo "ERROR: 升级二进制签名校验失败,已拒绝替换" >&2
-    rm -f /tmp/mmw-agent-new /tmp/mmw-agent-new.sig
+    rm -f /tmp/relaydock-agent-new /tmp/relaydock-agent-new.sig
     exit 1
 fi
 echo "Signature OK."
 
 # 替换二进制(systemd Restart=always 会在 agent 退出后拉起新版本)。
-# 直接 cp 到 /usr/local/bin/mmw-agent 会触发 "Text file busy",因为正在运行的 mmw-agent 进程占着该 inode。
+# 直接 cp 到 /usr/local/bin/relaydock-agent 会触发 "Text file busy",因为正在运行的 relaydock-agent 进程占着该 inode。
 # 改成"先 cp 到旁路文件,再原子 mv 覆盖" — Linux rename(2) 不影响正在执行的进程映射的旧 inode,
 # 新 inode 接管该路径,旧 inode 直到进程退出才释放。
-cp /tmp/mmw-agent-new /usr/local/bin/mmw-agent.new
-chmod +x /usr/local/bin/mmw-agent.new
-mv -f /usr/local/bin/mmw-agent.new /usr/local/bin/mmw-agent
-rm -f /tmp/mmw-agent-new
+cp /tmp/relaydock-agent-new /usr/local/bin/.relaydock-agent.new
+chmod +x /usr/local/bin/.relaydock-agent.new
+mv -f /usr/local/bin/.relaydock-agent.new /usr/local/bin/relaydock-agent
+rm -f /tmp/relaydock-agent-new
 echo "Binary replaced; agent will exit and systemd will restart with new version."
 `
 	script = strings.ReplaceAll(script, "__AGENT_RELEASE_TAG__", releaseTag)
@@ -6180,7 +6168,7 @@ echo "Binary replaced; agent will exit and systemd will restart with new version
 		time.Sleep(500 * time.Millisecond)
 		binPath, err := os.Executable()
 		if err != nil || binPath == "" {
-			binPath = "/usr/local/bin/mmw-agent"
+			binPath = "/usr/local/bin/relaydock-agent"
 		}
 		log.Printf("[Manage] Self-exec %s after upgrade (PID unchanged, no supervisor restart needed)", binPath)
 		if execErr := syscall.Exec(binPath, os.Args, os.Environ()); execErr != nil {
@@ -6195,15 +6183,15 @@ echo "Binary replaced; agent will exit and systemd will restart with new version
 
 // someoneWillRestartAgent 判断当前 agent 退出后是否有外部 supervisor 会自动拉起新进程。
 // 任一命中即返回 true,scheduleSelfRespawn 应跳过 — 否则会跟 supervisor 双开抢端口,
-// 出现"两个 mmw-agent 进程同时启动 → 一个 bind 失败循环退出 → 持续 flap"的现象。
+// 出现"两个 relaydock-agent 进程同时启动 → 一个 bind 失败循环退出 → 持续 flap"的现象。
 //
 // 识别顺序:
-//  1. systemd:/run/systemd/system 存在 + systemctl is-active mmw-agent
+//  1. systemd:/run/systemd/system 存在 + systemctl is-active relaydock-agent
 //  2. OpenRC / runit / s6:agent 的父进程是已知 supervisor(supervise-daemon / runsv / s6-supervise)
 func someoneWillRestartAgent() bool {
 	// 1) systemd
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
-		if out, err := exec.Command("systemctl", "is-active", "mmw-agent").Output(); err == nil {
+		if out, err := exec.Command("systemctl", "is-active", "relaydock-agent").Output(); err == nil {
 			if strings.TrimSpace(string(out)) == "active" {
 				return true
 			}

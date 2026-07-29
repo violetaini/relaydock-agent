@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package mmw.app.dispatcher;
+package relaydock.app.dispatcher;
 option go_package = "github.com/violetaini/relaydock-agent/internal/dispatcher";
 
 message SessionConfig {

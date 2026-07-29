@@ -14,9 +14,9 @@ export DOCKER=1
 #
 # 检测原理:bridge 模式典型特征是容器内 /proc/net/dev 有 eth0(veth),且没有宿主的网卡
 # 比如 ens* / enp* / wlan*。host 模式则相反 — 共享宿主网络栈,有所有宿主网卡。
-# 设 MMWX_REQUIRE_HOST_NETWORK=0 可绕过(不推荐,debug 用)。
+# 设 RELAYDOCK_REQUIRE_HOST_NETWORK=0 可绕过(不推荐,debug 用)。
 # ───────────────────────────────────────────────────────────────────
-if [ "${MMWX_REQUIRE_HOST_NETWORK:-1}" = "1" ]; then
+if [ "${RELAYDOCK_REQUIRE_HOST_NETWORK:-1}" = "1" ]; then
     # bridge 模式典型特征:默认路由网关是 docker 默认桥 (172.17.x.x / 172.18.x.x),
     # host 模式下默认网关是宿主真实网关(IP 段任意,但绝不会是 172.17/16)。
     # 仅用 grep 看接口名不靠谱(WSL2 / 一些 VPS 也只有 eth0)。
@@ -26,7 +26,7 @@ if [ "${MMWX_REQUIRE_HOST_NETWORK:-1}" = "1" ]; then
         *0011AC*|*0012AC*)
             # 172.17.x.x / 172.18.x.x — docker 默认桥
             echo ""
-            echo "❌ mmw-agent 必须用 host 网络模式启动!"
+            echo "❌ relaydock-agent 必须用 host 网络模式启动!"
             echo ""
             echo "  当前检测到 docker bridge 默认网关(172.17.x.x / 172.18.x.x)。"
             echo ""
@@ -37,7 +37,7 @@ if [ "${MMWX_REQUIRE_HOST_NETWORK:-1}" = "1" ]; then
             echo "  原因:xray 入站端口是用户在主控动态加的,bridge 模式得跟着改 -p 映射;"
             echo "        agent 监听给主控反向连接,bridge 也得多映射一个端口。host 直通宿主网络栈最省心。"
             echo ""
-            echo "  调试时绕过(不推荐):  -e MMWX_REQUIRE_HOST_NETWORK=0"
+            echo "  调试时绕过(不推荐):  -e RELAYDOCK_REQUIRE_HOST_NETWORK=0"
             echo ""
             exit 1
             ;;

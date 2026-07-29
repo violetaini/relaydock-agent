@@ -65,7 +65,7 @@ cd relaydock-agent
 # 编辑 docker-compose.yml，填写主控地址和面板生成的 Agent Token
 docker compose pull
 docker compose up -d
-docker compose logs -f mmw-agent
+docker compose logs -f relaydock-agent
 ```
 
 容器必须使用 host 网络；镜像采用内嵌 Xray 模式。配置和证书目录应保持持久化，具体挂载项见 `docker-compose.yml`。
@@ -79,25 +79,23 @@ docker compose logs -f mmw-agent
 
 复用模式不会接管主 `nginx.conf`。每次应用配置前都会执行语法检查；检查失败时不会重载 Nginx。
 
-## 兼容名称
+## 运行约定
 
-为兼容已经部署的服务器，以下内部名称继续保留：
+RelayDock Agent 使用以下统一运行标识：
 
-- 二进制与 systemd 服务：`mmw-agent`
-- 默认配置目录：`/etc/mmw-agent`
-- 环境变量前缀：`MMWX_*`
-
-这些名称只是兼容接口，项目和发布名称均为 RelayDock Agent。
+- 二进制与 systemd 服务：`relaydock-agent`
+- 默认配置目录：`/etc/relaydock-agent`
+- 环境变量前缀：`RELAYDOCK_*`
 
 常用环境变量：
 
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `MMWX_MASTER_URL` | RelayDock 主控地址 | 必填 |
-| `MMWX_MASTER_TOKEN` | 面板生成的服务器注册令牌 | 必填 |
-| `MMWX_CONNECTION_MODE` | `auto`、`websocket`、`http` 或 `pull` | `auto` |
-| `MMWX_LISTEN_PORT` | Agent 本地管理端口 | `23889` |
-| `MMWX_XRAY_MODE` | `external` 或 `embedded` | `external` |
+| `RELAYDOCK_MASTER_URL` | RelayDock 主控地址 | 必填 |
+| `RELAYDOCK_TOKEN` | 面板生成的服务器注册令牌 | 必填 |
+| `RELAYDOCK_CONNECTION_MODE` | `auto`、`websocket`、`http` 或 `pull` | `auto` |
+| `RELAYDOCK_LISTEN_PORT` | Agent 本地管理端口 | `23889` |
+| `RELAYDOCK_XRAY_MODE` | `external` 或 `embedded` | `external` |
 
 完整配置示例见 [config.example.yaml](config.example.yaml)。
 
@@ -110,7 +108,7 @@ git clone https://github.com/violetaini/relaydock-agent.git
 cd relaydock-agent
 go mod verify
 go test ./...
-go build -trimpath -o mmw-agent ./cmd/mmw-agent
+go build -trimpath -o relaydock-agent ./cmd/relaydock-agent
 ```
 
 生产环境建议使用 [Releases](https://github.com/violetaini/relaydock-agent/releases) 中经过 CI 构建和签名的文件。
@@ -124,3 +122,6 @@ go build -trimpath -o mmw-agent ./cmd/mmw-agent
 ## 许可与致谢
 
 RelayDock 遵循仓库内 [LICENSE](LICENSE) 所载的 MIT 许可与版权声明。
+
+感谢 [妙妙屋X](https://github.com/iluobei/miaomiaowuX) 与其
+[Agent 项目](https://github.com/iluobei/mmw-agent) 的开源工作，为 RelayDock 的早期实现提供了基础。

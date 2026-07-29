@@ -67,7 +67,7 @@ type Config struct {
 	RestartMethod         string        `yaml:"restart_method"`
 	RestartCommand        string        `yaml:"restart_command"`
 	MasterPublicKey       string        `yaml:"master_public_key"`
-	LogPath               string        `yaml:"log_path"` // 日志文件路径，默认 /var/log/mmw-agent/mmw-agent.log
+	LogPath               string        `yaml:"log_path"` // 日志文件路径，默认 /var/log/relaydock-agent/relaydock-agent.log
 	// HidePortOnWS 开启时:WS 连接可用期间关闭入站监听端口(隐藏 agent),WS 断开时立即重开以保证
 	// 主控 HTTP/pull 回退可达。*bool 区分"未配置"(默认 true)与显式 false。
 	HidePortOnWS *FlexBool `yaml:"hide_port_on_ws"`
@@ -78,12 +78,12 @@ type Config struct {
 }
 
 // DefaultLogPath 是 agent 日志文件默认路径（lumberjack 在同目录轮转生成备份）。
-const DefaultLogPath = "/var/log/mmw-agent/mmw-agent.log"
+const DefaultLogPath = "/var/log/relaydock-agent/relaydock-agent.log"
 
 // XrayAccessLogPathFor 返回内嵌 xray 的 access log 路径,与 agent 日志同目录。
 //
 // 为什么要独立文件:内嵌模式下 xray access log 默认直写进程 stdout,被 systemd 收进
-// mmw-agent unit —— 面板「查看 xray 日志」查的是 journalctl -u xray(不存在的 unit),
+// relaydock-agent unit —— 面板「查看 xray 日志」查的是 journalctl -u xray(不存在的 unit),
 // 所以看不到连接日志。改让 xray 把 access log 落这个文件,面板直接读它,不依赖 systemd,
 // Docker 部署也能读。轮转由 agent 侧 copytruncate 负责(xray 用 O_APPEND,truncate 后无空洞)。
 func XrayAccessLogPathFor(agentLogPath string) string {
@@ -122,37 +122,37 @@ func Load(path string) (*Config, error) {
 // 从环境变量构造配置（不含默认值，用于 Merge）。
 func fromEnvRaw() *Config {
 	config := &Config{
-		MasterURL:       os.Getenv("MMWX_MASTER_URL"),
-		Token:           os.Getenv("MMWX_TOKEN"),
-		ConnectionMode:  os.Getenv("MMWX_CONNECTION_MODE"),
-		ListenPort:      os.Getenv("MMWX_LISTEN_PORT"),
-		XrayMode:        os.Getenv("MMWX_XRAY_MODE"),
-		NginxMode:       os.Getenv("MMWX_NGINX_MODE"),
-		RestartMethod:   os.Getenv("MMWX_RESTART_METHOD"),
-		RestartCommand:  os.Getenv("MMWX_RESTART_COMMAND"),
-		MasterPublicKey: os.Getenv("MMWX_MASTER_PUBLIC_KEY"),
-		LogPath:         os.Getenv("MMWX_LOG_PATH"),
+		MasterURL:       os.Getenv("RELAYDOCK_MASTER_URL"),
+		Token:           os.Getenv("RELAYDOCK_TOKEN"),
+		ConnectionMode:  os.Getenv("RELAYDOCK_CONNECTION_MODE"),
+		ListenPort:      os.Getenv("RELAYDOCK_LISTEN_PORT"),
+		XrayMode:        os.Getenv("RELAYDOCK_XRAY_MODE"),
+		NginxMode:       os.Getenv("RELAYDOCK_NGINX_MODE"),
+		RestartMethod:   os.Getenv("RELAYDOCK_RESTART_METHOD"),
+		RestartCommand:  os.Getenv("RELAYDOCK_RESTART_COMMAND"),
+		MasterPublicKey: os.Getenv("RELAYDOCK_MASTER_PUBLIC_KEY"),
+		LogPath:         os.Getenv("RELAYDOCK_LOG_PATH"),
 	}
 
-	if xrayConfig := os.Getenv("MMWX_XRAY_CONFIG"); xrayConfig != "" {
+	if xrayConfig := os.Getenv("RELAYDOCK_XRAY_CONFIG"); xrayConfig != "" {
 		server := XrayServer{Name: "primary", ConfigPath: xrayConfig}
-		if confDir := os.Getenv("MMWX_XRAY_CONFDIR"); confDir != "" {
+		if confDir := os.Getenv("RELAYDOCK_XRAY_CONFDIR"); confDir != "" {
 			server.ConfDir = confDir
 		}
 		config.XrayServers = []XrayServer{server}
 	}
 
-	if interval := os.Getenv("MMWX_TRAFFIC_INTERVAL"); interval != "" {
+	if interval := os.Getenv("RELAYDOCK_TRAFFIC_INTERVAL"); interval != "" {
 		if d, err := time.ParseDuration(interval); err == nil {
 			config.TrafficReportInterval = d
 		}
 	}
-	if interval := os.Getenv("MMWX_SPEED_INTERVAL"); interval != "" {
+	if interval := os.Getenv("RELAYDOCK_SPEED_INTERVAL"); interval != "" {
 		if d, err := time.ParseDuration(interval); err == nil {
 			config.SpeedReportInterval = d
 		}
 	}
-	if v := os.Getenv("MMWX_HIDE_PORT_ON_WS"); v != "" {
+	if v := os.Getenv("RELAYDOCK_HIDE_PORT_ON_WS"); v != "" {
 		b := FlexBool(v == "1" || v == "true")
 		config.HidePortOnWS = &b
 	}

@@ -7,7 +7,7 @@
 #   bash scripts/release.sh major      # major +1
 #   bash scripts/release.sh 1.2.3      # 指定版本号
 #
-# 说明：mmw-agent 无前端/package.json。版本号同步到 internal/version/version.go(运行时上报)
+# 说明：relaydock-agent 无前端/package.json。版本号同步到 internal/version/version.go(运行时上报)
 # 和 git tag(GitHub release / 升级脚本拉 latest 用)。
 # 推送 tag 不会自动构建。只有执行本发布脚本时，才会显式触发 GitHub 工作流，
 # 编译 4 个平台二进制并上传到本 Release。

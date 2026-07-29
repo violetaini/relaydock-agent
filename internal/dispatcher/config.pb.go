@@ -105,10 +105,10 @@ var File_internal_dispatcher_config_proto protoreflect.FileDescriptor
 
 const file_internal_dispatcher_config_proto_rawDesc = "" +
 	"\n" +
-	" internal/dispatcher/config.proto\x12\x12mmw.app.dispatcher\"\x15\n" +
-	"\rSessionConfigJ\x04\b\x01\x10\x02\"G\n" +
-	"\x06Config\x12=\n" +
-	"\bsettings\x18\x01 \x01(\v2!.mmw.app.dispatcher.SessionConfigR\bsettingsB\x3bZ\x39github.com/violetaini/relaydock-agent/internal/dispatcherb\x06proto3"
+	" internal/dispatcher/config.proto\x12\x18relaydock.app.dispatcher\"\x15\n" +
+	"\rSessionConfigJ\x04\b\x01\x10\x02\"M\n" +
+	"\x06Config\x12C\n" +
+	"\bsettings\x18\x01 \x01(\v2'.relaydock.app.dispatcher.SessionConfigR\bsettingsB;Z9github.com/violetaini/relaydock-agent/internal/dispatcherb\x06proto3"
 
 var (
 	file_internal_dispatcher_config_proto_rawDescOnce sync.Once
@@ -124,11 +124,11 @@ func file_internal_dispatcher_config_proto_rawDescGZIP() []byte {
 
 var file_internal_dispatcher_config_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_internal_dispatcher_config_proto_goTypes = []any{
-	(*SessionConfig)(nil), // 0: mmw.app.dispatcher.SessionConfig
-	(*Config)(nil),        // 1: mmw.app.dispatcher.Config
+	(*SessionConfig)(nil), // 0: relaydock.app.dispatcher.SessionConfig
+	(*Config)(nil),        // 1: relaydock.app.dispatcher.Config
 }
 var file_internal_dispatcher_config_proto_depIdxs = []int32{
-	0, // 0: mmw.app.dispatcher.Config.settings:type_name -> mmw.app.dispatcher.SessionConfig
+	0, // 0: relaydock.app.dispatcher.Config.settings:type_name -> relaydock.app.dispatcher.SessionConfig
 	1, // [1:1] is the sub-list for method output_type
 	1, // [1:1] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name

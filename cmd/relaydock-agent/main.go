@@ -107,17 +107,17 @@ func indexByte(b []byte, c byte) int {
 }
 
 // setupMemoryLimit 给进程设内存软上限(GOMEMLIMIT 等价),让 GC 在接近上限时更激进回收。
-// 优先级:用户已设的 GOMEMLIMIT > MMWX_LOG... 不,> MMWX_MEM_LIMIT_MB > embedded 模式按系统内存 75% 自动设。
+// 优先级:用户已设的 GOMEMLIMIT > RELAYDOCK_MEM_LIMIT_MB > embedded 模式按系统内存 75% 自动设。
 // external 模式 agent 内存很小,不自动设(避免无谓的 GC 压力)。
 func setupMemoryLimit(embedded bool) {
 	// 用户已通过 GOMEMLIMIT 环境变量显式设置(runtime 启动时已生效)→ 尊重,不覆盖。
 	if debug.SetMemoryLimit(-1) != math.MaxInt64 {
 		return
 	}
-	if v := os.Getenv("MMWX_MEM_LIMIT_MB"); v != "" {
+	if v := os.Getenv("RELAYDOCK_MEM_LIMIT_MB"); v != "" {
 		if mb, err := strconv.Atoi(v); err == nil && mb > 0 {
 			debug.SetMemoryLimit(int64(mb) << 20)
-			log.Printf("[Main] 内存软上限 %d MiB (MMWX_MEM_LIMIT_MB)", mb)
+			log.Printf("[Main] 内存软上限 %d MiB (RELAYDOCK_MEM_LIMIT_MB)", mb)
 			return
 		}
 	}
@@ -161,9 +161,9 @@ func parseMemTotalBytes(meminfo string) int64 {
 func cleanupLogsLoop(dir string) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	enforceMaxLogFiles(dir, "mmw-agent", 2)
+	enforceMaxLogFiles(dir, "relaydock-agent", 2)
 	for range ticker.C {
-		enforceMaxLogFiles(dir, "mmw-agent", 2)
+		enforceMaxLogFiles(dir, "relaydock-agent", 2)
 	}
 }
 
@@ -208,7 +208,7 @@ func main() {
 	// 必须在 flag.Parse 之前拦截。
 	if len(os.Args) >= 2 && os.Args[1] == "__verify-update" {
 		if len(os.Args) != 4 {
-			fmt.Fprintln(os.Stderr, "usage: mmw-agent __verify-update <binary> <sig>")
+			fmt.Fprintln(os.Stderr, "usage: relaydock-agent __verify-update <binary> <sig>")
 			os.Exit(2)
 		}
 		if err := selfupdate.VerifyFile(os.Args[2], os.Args[3]); err != nil {
@@ -268,7 +268,7 @@ func main() {
 	// 日志真实落地到文件 + 保留 stdout(供 systemd journald / 容器查看)。
 	setupLogging(cfg.LogPath)
 
-	// 内嵌模式:让 xray 把 access log 落独立文件(而非直写 stdout 进 mmw-agent unit),
+	// 内嵌模式:让 xray 把 access log 落独立文件(而非直写 stdout 进 relaydock-agent unit),
 	// 面板「查看 xray 日志」才读得到连接日志。轮转由下方 xrayAccessLogRotateLoop 负责。
 	xrayAccessLog := config.XrayAccessLogPathFor(cfg.LogPath)
 	if cfg.XrayMode == "embedded" {
@@ -279,7 +279,7 @@ func main() {
 	// embedded 模式 agent 内联 xray 承载所有代理连接,设内存软上限让 GC 更早回收、抑制 RSS 暴涨。
 	setupMemoryLimit(cfg.XrayMode == "embedded")
 
-	log.Printf("[Main] Starting mmw-agent")
+	log.Printf("[Main] Starting relaydock-agent")
 	log.Printf("[Main] Log file: %s", cfg.LogPath)
 	log.Printf("[Main] Connection mode: %s", cfg.ConnectionMode)
 	log.Printf("[Main] Xray mode: %s", cfg.XrayMode)
@@ -341,15 +341,15 @@ func main() {
 	// 嵌入模式：启动内嵌 Xray 实例
 	var embeddedXray *embedded.EmbeddedXray
 	if cfg.XrayMode == "embedded" {
-		// embedded 模式统一使用 mmwx 标准路径(constants.DefaultXrayConfigPaths[0],
+		// embedded 模式统一使用 RelayDock 标准路径(constants.DefaultXrayConfigPaths[0],
 		// 通常是 /usr/local/etc/xray/config.json),不管以前外置 xray 装在哪。
-		// 这样跨服务器路径一致,mmwx UI / API 永远操作同一个文件。
+		// 这样跨服务器路径一致,RelayDock UI / API 永远操作同一个文件。
 		//
 		// 注:config.applyDefaults 启动时会 auto-discover 把发现的路径填进 cfg.XrayServers,
-		// embedded 模式下要忽略它(那是外置 xray 的路径,不是 mmwx 接管后的目标)。
+		// embedded 模式下要忽略它(那是外置 xray 的路径,不是 RelayDock 接管后的目标)。
 		configPath := constants.DefaultXrayConfigPaths[0]
 
-		// 探测当前外置 xray 在跑哪个 config 路径 + confdir,合并迁移到 mmwx 标准路径。
+		// 探测当前外置 xray 在跑哪个 config 路径 + confdir,合并迁移到 RelayDock 标准路径。
 		discovered := discovery.Discover()
 		if discovered.ConfigPath != "" && discovered.ConfigPath != configPath {
 			merged, backup, err := handler.MergeXrayConfdirInto(discovered, configPath)
@@ -358,8 +358,8 @@ func main() {
 			} else {
 				log.Printf("[Main] Embedded mode: imported external xray config from %s (+%d confdir files) into %s; confdir backup: %s",
 					discovered.ConfigPath, merged, configPath, backup)
-				// 把原外置 config 归档(防止外置 xray 被误启动后又抢端口/与 mmwx 配置漂移)
-				_ = os.Rename(discovered.ConfigPath, discovered.ConfigPath+".before-mmwx-"+time.Now().Format("20060102-150405"))
+				// 把原外置 config 归档(防止外置 xray 被误启动后又抢端口/与 RelayDock 配置漂移)
+				_ = os.Rename(discovered.ConfigPath, discovered.ConfigPath+".before-relaydock-"+time.Now().Format("20060102-150405"))
 			}
 		} else if discovered.ConfigPath == configPath && discovered.ConfDir != "" {
 			// 路径相同但有 confdir 多片,原地合并
@@ -534,7 +534,7 @@ func main() {
 	// orphan / TIME_WAIT 套接字短暂占港 → 立刻切端口并 persist → 用户配的 NAT 端口转发
 	// 全部失效 → 主控反向 HTTP 全 502。LXC 案例就是这个。)
 	//
-	//   1. listenWithRetry 在原端口轮询 12s,期间还会主动 kill 别的 mmw-agent 进程。
+	//   1. listenWithRetry 在原端口轮询 12s,期间还会主动 kill 别的 relaydock-agent 进程。
 	//      80%+ 的"冲突"其实是 systemd 快速重启导致的 socket 没释放 / orphan,这个阶段就解决。
 	//   2. 真的拼不下来才切端口 + persist。这种情况通常是另一个真实进程(xray inbound /
 	//      用户自建服务等)长期占港,持久切换是合理的。
@@ -785,7 +785,7 @@ func downloadFile(dest, url string) error {
 // 直接 fatal 会触发又一轮 5s 间隔的重启,把秒级问题拖成分钟级。
 //
 // 兜底:若 attempts 一半之后仍 EADDRINUSE,说明不是"内核延迟回收"而是真的有别的进程在占。
-// 主动找系统里其它 mmw-agent 进程(老的、systemd 没追踪到的 zombie)并 SIGKILL,避免无限重启循环。
+// 主动找系统里其它 relaydock-agent 进程(老的、systemd 没追踪到的 zombie)并 SIGKILL,避免无限重启循环。
 func listenWithRetry(network, addr string, attempts int, delay time.Duration) (net.Listener, error) {
 	var lastErr error
 	for i := 0; i < attempts; i++ {
@@ -802,11 +802,11 @@ func listenWithRetry(network, addr string, attempts int, delay time.Duration) (n
 			return nil, err
 		}
 		log.Printf("[Main] HTTP bind attempt %d/%d failed on %s (will retry in %v): %v", i+1, attempts, addr, delay, err)
-		// 第一次失败就立即扫并杀掉别的 mmw-agent 进程 — systemctl restart 没杀干净老 agent
+		// 第一次失败就立即扫并杀掉别的 relaydock-agent 进程 — systemctl restart 没杀干净老 agent
 		// 是最常见的占港原因,等到第 4 次再杀让用户等 8s 没必要
 		if i == 0 {
-			if n := killOtherMmwAgentProcesses(); n > 0 {
-				log.Printf("[Main] Killed %d orphan mmw-agent process(es), retrying bind", n)
+			if n := killOtherRelayDockAgentProcesses(); n > 0 {
+				log.Printf("[Main] Killed %d orphan relaydock-agent process(es), retrying bind", n)
 			}
 		}
 		time.Sleep(delay)
@@ -870,9 +870,9 @@ func persistListenPort(cfgFile, newPort string) error {
 	return os.WriteFile(cfgFile, []byte(strings.Join(lines, "\n")), 0644)
 }
 
-// killOtherMmwAgentProcesses 扫 /proc,把 exe 指向 mmw-agent 但 PID 不等于自己的进程全部 SIGKILL。
+// killOtherRelayDockAgentProcesses 扫 /proc,把 exe 指向 relaydock-agent 但 PID 不等于自己的进程全部 SIGKILL。
 // 处理"老 agent 没死透 / systemd 没追踪到的 zombie"导致新实例无法 bind 端口的情况。
-func killOtherMmwAgentProcesses() int {
+func killOtherRelayDockAgentProcesses() int {
 	self := os.Getpid()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -898,12 +898,12 @@ func killOtherMmwAgentProcesses() int {
 		if err != nil {
 			continue
 		}
-		// exe 可能是 /usr/local/bin/mmw-agent 或 /tmp/mmw-agent 之类,后缀匹配 mmw-agent
-		if !strings.HasSuffix(exe, "/mmw-agent") && !strings.Contains(exe, "mmw-agent ") {
+		// exe 可能是 /usr/local/bin/relaydock-agent 或 /tmp/relaydock-agent 之类,后缀匹配 relaydock-agent
+		if !strings.HasSuffix(exe, "/relaydock-agent") && !strings.Contains(exe, "relaydock-agent ") {
 			continue
 		}
 		if err := syscall.Kill(pid, syscall.SIGKILL); err == nil {
-			log.Printf("[Main] SIGKILL orphan mmw-agent pid=%d exe=%s", pid, exe)
+			log.Printf("[Main] SIGKILL orphan relaydock-agent pid=%d exe=%s", pid, exe)
 			killed++
 		}
 	}

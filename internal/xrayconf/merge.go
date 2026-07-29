@@ -124,11 +124,11 @@ func readJSONFile(path string) (map[string]interface{}, error) {
 	return m, nil
 }
 
-// WriteAPIConfig writes the API-related config to confDir/99-mmwx-api.json
+// WriteAPIConfig writes the API-related config to confDir/99-relaydock-api.json
 // (for confdir mode) or merges into the single config file.
 func WriteAPIConfig(configPath, confDir string, sections map[string]interface{}) error {
 	if confDir != "" {
-		target := filepath.Join(confDir, "99-mmwx-api.json")
+		target := filepath.Join(confDir, "99-relaydock-api.json")
 		data, _ := json.MarshalIndent(sections, "", "    ")
 		return os.WriteFile(target, data, 0644)
 	}

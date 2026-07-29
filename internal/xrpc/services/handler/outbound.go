@@ -83,7 +83,7 @@ func AddHTTPOutbound(ctx context.Context, client command.HandlerServiceClient, t
 		serial.ToTypedMessage(&http.ClientConfig{
 			Server: endpoint("example.com", 80, nil),
 			Header: []*http.Header{
-				{Key: "User-Agent", Value: constants.AgentWireUserAgent()},
+				{Key: "User-Agent", Value: constants.AgentUserAgent},
 			},
 		}),
 	)

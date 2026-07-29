@@ -21,7 +21,7 @@ func (c *recordingHandlerServiceClient) AddOutbound(_ context.Context, request *
 	return &command.AddOutboundResponse{}, nil
 }
 
-func TestAddHTTPOutboundUsesLegacyCompatibleUserAgent(t *testing.T) {
+func TestAddHTTPOutboundUsesRelayDockUserAgent(t *testing.T) {
 	client := &recordingHandlerServiceClient{}
 	if err := AddHTTPOutbound(context.Background(), client, "test-http"); err != nil {
 		t.Fatal(err)
@@ -41,8 +41,8 @@ func TestAddHTTPOutboundUsesLegacyCompatibleUserAgent(t *testing.T) {
 
 	for _, header := range config.Header {
 		if header.Key == "User-Agent" {
-			if header.Value != constants.AgentWireUserAgent() {
-				t.Fatalf("xRPC outbound User-Agent = %q, want %q", header.Value, constants.AgentWireUserAgent())
+			if header.Value != constants.AgentUserAgent {
+				t.Fatalf("xRPC outbound User-Agent = %q, want %q", header.Value, constants.AgentUserAgent)
 			}
 			return
 		}

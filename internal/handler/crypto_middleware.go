@@ -142,8 +142,5 @@ func pullExtractToken(r *http.Request) string {
 	if after, ok := strings.CutPrefix(auth, constants.BearerPrefix); ok {
 		return after
 	}
-	if token := r.Header.Get(constants.HeaderMMRemoteToken); token != "" {
-		return token
-	}
 	return ""
 }

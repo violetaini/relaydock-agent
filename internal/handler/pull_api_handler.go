@@ -98,15 +98,6 @@ func (h *APIHandler) authenticate(r *http.Request) bool {
 		return true
 	}
 
-	auth := r.Header.Get(constants.HeaderAuthorization)
-	if auth == "" {
-		return false
-	}
-
-	if strings.HasPrefix(auth, constants.BearerPrefix) {
-		token := strings.TrimPrefix(auth, constants.BearerPrefix)
-		return token == h.configToken
-	}
-
-	return auth == h.configToken
+	token, ok := strings.CutPrefix(r.Header.Get(constants.HeaderAuthorization), constants.BearerPrefix)
+	return ok && token == h.configToken
 }

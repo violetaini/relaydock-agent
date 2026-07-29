@@ -381,20 +381,21 @@ restore_local_recovery_path() {
 
 for_each_local_recovery_path() {
     RECOVERY_ACTION="$1"
-    "$RECOVERY_ACTION" /usr/local/bin/mmw-agent mmw-agent || return 1
-    "$RECOVERY_ACTION" /usr/local/bin/.mmw-agent.new mmw-agent-new || return 1
+    "$RECOVERY_ACTION" /usr/local/bin/relaydock-agent relaydock-agent || return 1
+    "$RECOVERY_ACTION" /usr/local/bin/.relaydock-agent.new relaydock-agent-new || return 1
     "$RECOVERY_ACTION" /usr/local/bin/arcway-expiry-guard expiry-guard || return 1
     "$RECOVERY_ACTION" /usr/local/bin/.arcway-expiry-guard.new expiry-guard-new || return 1
-    "$RECOVERY_ACTION" /etc/mmw-agent/config.yaml agent-config || return 1
+    "$RECOVERY_ACTION" /etc/relaydock-agent/config.yaml agent-config || return 1
+    "$RECOVERY_ACTION" /etc/relaydock-agent/.relaydock-inbound-mutation-fences.json agent-inbound-state || return 1
     "$RECOVERY_ACTION" /etc/arcway-expiry-guard.env expiry-guard-env || return 1
     "$RECOVERY_ACTION" /etc/arcway-port-firewall.env firewall-env || return 1
     "$RECOVERY_ACTION" /usr/local/sbin/arcway-agent-firewall firewall-helper || return 1
     "$RECOVERY_ACTION" /usr/local/sbin/arcway-nginx-bridge nginx-helper || return 1
-    "$RECOVERY_ACTION" /etc/systemd/system/mmw-agent.service systemd-agent || return 1
+    "$RECOVERY_ACTION" /etc/systemd/system/relaydock-agent.service systemd-agent || return 1
     "$RECOVERY_ACTION" /etc/systemd/system/arcway-expiry-guard.service systemd-guard || return 1
-    "$RECOVERY_ACTION" /etc/init.d/mmw-agent openrc-agent || return 1
+    "$RECOVERY_ACTION" /etc/init.d/relaydock-agent openrc-agent || return 1
     "$RECOVERY_ACTION" /etc/init.d/arcway-expiry-guard openrc-guard || return 1
-    "$RECOVERY_ACTION" /usr/local/bin/mmw-agent-supervisor.sh supervisor-agent || return 1
+    "$RECOVERY_ACTION" /usr/local/bin/relaydock-agent-supervisor.sh supervisor-agent || return 1
     "$RECOVERY_ACTION" /usr/local/bin/arcway-expiry-guard-supervisor.sh supervisor-guard || return 1
     "$RECOVERY_ACTION" /etc/rc.local rc-local || return 1
 }
@@ -411,8 +412,8 @@ restart_recovered_agent() {
     if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload >/dev/null 2>&1 || return 1
         if [ -f "$LOCAL_RECOVERY_DIR/systemd-agent.present" ]; then
-            systemctl enable mmw-agent.service >/dev/null 2>&1 || return 1
-            systemctl restart mmw-agent.service >/dev/null 2>&1 || return 1
+            systemctl enable relaydock-agent.service >/dev/null 2>&1 || return 1
+            systemctl restart relaydock-agent.service >/dev/null 2>&1 || return 1
         fi
         if [ -f "$LOCAL_RECOVERY_DIR/systemd-guard.present" ]; then
             systemctl enable arcway-expiry-guard.service >/dev/null 2>&1 || return 1
@@ -420,15 +421,15 @@ restart_recovered_agent() {
         fi
     elif command -v rc-service >/dev/null 2>&1; then
         if [ -f "$LOCAL_RECOVERY_DIR/openrc-agent.present" ]; then
-            command -v rc-update >/dev/null 2>&1 && rc-update add mmw-agent default >/dev/null 2>&1 || true
-            rc-service mmw-agent restart >/dev/null 2>&1 || return 1
+            command -v rc-update >/dev/null 2>&1 && rc-update add relaydock-agent default >/dev/null 2>&1 || true
+            rc-service relaydock-agent restart >/dev/null 2>&1 || return 1
         fi
         if [ -f "$LOCAL_RECOVERY_DIR/openrc-guard.present" ]; then
             command -v rc-update >/dev/null 2>&1 && rc-update add arcway-expiry-guard default >/dev/null 2>&1 || true
             rc-service arcway-expiry-guard restart >/dev/null 2>&1 || return 1
         fi
-    elif [ -x /usr/local/bin/mmw-agent-supervisor.sh ]; then
-        nohup /usr/local/bin/mmw-agent-supervisor.sh >/dev/null 2>&1 &
+    elif [ -x /usr/local/bin/relaydock-agent-supervisor.sh ]; then
+        nohup /usr/local/bin/relaydock-agent-supervisor.sh >/dev/null 2>&1 &
         if [ -x /usr/local/bin/arcway-expiry-guard-supervisor.sh ]; then
             nohup /usr/local/bin/arcway-expiry-guard-supervisor.sh >/dev/null 2>&1 &
         fi
@@ -438,8 +439,8 @@ restart_recovered_agent() {
 
     RECOVERY_WAIT=0
     while [ "$RECOVERY_WAIT" -lt 10 ]; do
-        if pgrep -f '^/usr/local/bin/mmw-agent([[:space:]]|$)' >/dev/null 2>&1 || \
-            pgrep -f '/usr/local/bin/mmw-agent-supervisor[.]sh' >/dev/null 2>&1; then
+        if pgrep -f '^/usr/local/bin/relaydock-agent([[:space:]]|$)' >/dev/null 2>&1 || \
+            pgrep -f '/usr/local/bin/relaydock-agent-supervisor[.]sh' >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -497,7 +498,7 @@ cleanup_rc_local() {
     [ -f /etc/rc.local ] || return 0
     RC_TEMP=$(mktemp "$RUNTIME_DIR/arcway-rc-local.XXXXXX") || return 1
     if ! awk '
-        /arcway-agent-firewall|arcway-nginx-bridge|mmw-agent-supervisor[.]sh|arcway-expiry-guard-supervisor[.]sh/ { next }
+        /arcway-agent-firewall|arcway-nginx-bridge|relaydock-agent-supervisor[.]sh|arcway-expiry-guard-supervisor[.]sh/ { next }
         { print }
     ' /etc/rc.local > "$RC_TEMP"; then
         return 1
@@ -519,21 +520,21 @@ fi
 # The HTTP handler checks this before dispatch, but the detached runner starts
 # later. Re-check immediately before stopping Agent so a concurrent WARP install
 # cannot be discovered only after the executable has already been removed.
-if [ -e /etc/mmw-agent/warp.json ] || [ -L /etc/mmw-agent/warp.json ]; then
+if [ -e /etc/relaydock-agent/warp.json ] || [ -L /etc/relaydock-agent/warp.json ]; then
     FINAL_ERROR="WARP appeared while Agent uninstall was being dispatched"
     log_cleanup "$FINAL_ERROR"
     exit 1
 fi
 
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl disable arcway-expiry-guard.service mmw-agent.service >/dev/null 2>&1 || true
+    systemctl disable arcway-expiry-guard.service relaydock-agent.service >/dev/null 2>&1 || true
     systemctl stop arcway-expiry-guard.service >/dev/null 2>&1 || true
-    systemctl stop mmw-agent.service >/dev/null 2>&1 || true
+    systemctl stop relaydock-agent.service >/dev/null 2>&1 || true
 elif command -v rc-service >/dev/null 2>&1; then
     command -v rc-update >/dev/null 2>&1 && rc-update del arcway-expiry-guard default >/dev/null 2>&1 || true
-    command -v rc-update >/dev/null 2>&1 && rc-update del mmw-agent default >/dev/null 2>&1 || true
+    command -v rc-update >/dev/null 2>&1 && rc-update del relaydock-agent default >/dev/null 2>&1 || true
     rc-service arcway-expiry-guard stop >/dev/null 2>&1 || true
-    rc-service mmw-agent stop >/dev/null 2>&1 || true
+    rc-service relaydock-agent stop >/dev/null 2>&1 || true
 fi
 
 # These exact installed paths are Arcway-owned. Killing them is safe after all
@@ -557,9 +558,9 @@ stop_owned_process() {
 
 PROCESS_STOP_FAILED=0
 stop_owned_process '/usr/local/bin/arcway-expiry-guard-supervisor[.]sh' || PROCESS_STOP_FAILED=1
-stop_owned_process '/usr/local/bin/mmw-agent-supervisor[.]sh' || PROCESS_STOP_FAILED=1
+stop_owned_process '/usr/local/bin/relaydock-agent-supervisor[.]sh' || PROCESS_STOP_FAILED=1
 stop_owned_process '^/usr/local/bin/arcway-expiry-guard([[:space:]]|$)' || PROCESS_STOP_FAILED=1
-stop_owned_process '^/usr/local/bin/mmw-agent([[:space:]]|$)' || PROCESS_STOP_FAILED=1
+stop_owned_process '^/usr/local/bin/relaydock-agent([[:space:]]|$)' || PROCESS_STOP_FAILED=1
 if [ "$PROCESS_STOP_FAILED" -ne 0 ]; then
     FINAL_ERROR="Arcway process did not stop"
     log_cleanup "$FINAL_ERROR"
@@ -632,27 +633,27 @@ verify_precommit_cleanup() {
     PRECOMMIT_VERIFY_FAILED=0
     for PROCESS_PATTERN in \
         '/usr/local/bin/arcway-expiry-guard-supervisor[.]sh' \
-        '/usr/local/bin/mmw-agent-supervisor[.]sh' \
+        '/usr/local/bin/relaydock-agent-supervisor[.]sh' \
         '^/usr/local/bin/arcway-expiry-guard([[:space:]]|$)' \
-        '^/usr/local/bin/mmw-agent([[:space:]]|$)'; do
+        '^/usr/local/bin/relaydock-agent([[:space:]]|$)'; do
         pgrep -f "$PROCESS_PATTERN" >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
     done
 
     if [ -d /run/systemd/system ]; then
-        systemctl is-active --quiet mmw-agent.service >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
+        systemctl is-active --quiet relaydock-agent.service >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
         systemctl is-active --quiet arcway-expiry-guard.service >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
-        systemctl is-enabled --quiet mmw-agent.service >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
+        systemctl is-enabled --quiet relaydock-agent.service >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
         systemctl is-enabled --quiet arcway-expiry-guard.service >/dev/null 2>&1 && PRECOMMIT_VERIFY_FAILED=1
     fi
     for BOOT_LINK in \
-        /etc/systemd/system/*target.wants/mmw-agent.service \
+        /etc/systemd/system/*target.wants/relaydock-agent.service \
         /etc/systemd/system/*target.wants/arcway-expiry-guard.service \
-        /etc/runlevels/*/mmw-agent \
+        /etc/runlevels/*/relaydock-agent \
         /etc/runlevels/*/arcway-expiry-guard; do
         [ ! -e "$BOOT_LINK" ] && [ ! -L "$BOOT_LINK" ] || PRECOMMIT_VERIFY_FAILED=1
     done
     if [ -f /etc/rc.local ] && grep -Eq \
-        'arcway-agent-firewall|arcway-nginx-bridge|mmw-agent-supervisor[.]sh|arcway-expiry-guard-supervisor[.]sh' \
+        'arcway-agent-firewall|arcway-nginx-bridge|relaydock-agent-supervisor[.]sh|arcway-expiry-guard-supervisor[.]sh' \
         /etc/rc.local; then
         PRECOMMIT_VERIFY_FAILED=1
     fi
@@ -671,7 +672,7 @@ verify_precommit_cleanup() {
         PRECOMMIT_VERIFY_FAILED=1
     fi
 
-    [ ! -e /etc/mmw-agent/warp.json ] && [ ! -L /etc/mmw-agent/warp.json ] || PRECOMMIT_VERIFY_FAILED=1
+    [ ! -e /etc/relaydock-agent/warp.json ] && [ ! -L /etc/relaydock-agent/warp.json ] || PRECOMMIT_VERIFY_FAILED=1
     [ ! -e /www/server/panel/vhost/nginx/zz_arcway_loader.conf ] && \
         [ ! -L /www/server/panel/vhost/nginx/zz_arcway_loader.conf ] || PRECOMMIT_VERIFY_FAILED=1
     [ ! -e /www/server/panel/vhost/nginx/tcp/zz_arcway_loader.conf ] && \
@@ -686,45 +687,46 @@ if ! verify_precommit_cleanup; then
 fi
 
 if ! rm -f \
-    /usr/local/bin/mmw-agent \
-    /usr/local/bin/.mmw-agent.new \
+    /usr/local/bin/relaydock-agent \
+    /usr/local/bin/.relaydock-agent.new \
     /usr/local/bin/arcway-expiry-guard \
     /usr/local/bin/.arcway-expiry-guard.new \
-    /etc/mmw-agent/config.yaml \
+    /etc/relaydock-agent/config.yaml \
+    /etc/relaydock-agent/.relaydock-inbound-mutation-fences.json \
     /etc/arcway-expiry-guard.env \
     /etc/arcway-port-firewall.env \
     /usr/local/sbin/arcway-agent-firewall \
     /usr/local/sbin/arcway-nginx-bridge \
-    /etc/systemd/system/mmw-agent.service \
+    /etc/systemd/system/relaydock-agent.service \
     /etc/systemd/system/arcway-expiry-guard.service \
-    /etc/init.d/mmw-agent \
+    /etc/init.d/relaydock-agent \
     /etc/init.d/arcway-expiry-guard \
-    /usr/local/bin/mmw-agent-supervisor.sh \
+    /usr/local/bin/relaydock-agent-supervisor.sh \
     /usr/local/bin/arcway-expiry-guard-supervisor.sh; then
     FINAL_ERROR="could not remove one or more Agent files"
     log_cleanup "$FINAL_ERROR"
     exit 1
 fi
-if ! rm -f /etc/systemd/system/*target.wants/mmw-agent.service \
+if ! rm -f /etc/systemd/system/*target.wants/relaydock-agent.service \
     /etc/systemd/system/*target.wants/arcway-expiry-guard.service \
-    /etc/runlevels/*/mmw-agent /etc/runlevels/*/arcway-expiry-guard; then
+    /etc/runlevels/*/relaydock-agent /etc/runlevels/*/arcway-expiry-guard; then
     FINAL_ERROR="could not remove Agent boot links"
     log_cleanup "$FINAL_ERROR"
     exit 1
 fi
-if ! rm -rf /var/lib/mmw-agent /var/lib/arcway-expiry-guard /var/log/mmw-agent; then
+if ! rm -rf /var/lib/relaydock-agent /var/lib/arcway-expiry-guard /var/log/relaydock-agent; then
     FINAL_ERROR="could not remove Agent state directories"
     log_cleanup "$FINAL_ERROR"
     exit 1
 fi
-rmdir /etc/mmw-agent >/dev/null 2>&1 || true
+rmdir /etc/relaydock-agent >/dev/null 2>&1 || true
 exec 8>&-
 rm -f "$RUNTIME_DIR/arcway-agent-firewall.lock" "$RUNTIME_DIR/arcway-nginx-bridge.lock"
 rm -rf "$RUNTIME_DIR"/arcway-agent-firewall.* "$RUNTIME_DIR"/arcway-nginx-bridge.*
 
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed mmw-agent.service arcway-expiry-guard.service >/dev/null 2>&1 || true
+    systemctl reset-failed relaydock-agent.service arcway-expiry-guard.service >/dev/null 2>&1 || true
 fi
 
 verify_removed_path() {
@@ -735,27 +737,27 @@ verify_cleanup() {
     VERIFY_FAILED=0
     for PROCESS_PATTERN in \
         '/usr/local/bin/arcway-expiry-guard-supervisor[.]sh' \
-        '/usr/local/bin/mmw-agent-supervisor[.]sh' \
+        '/usr/local/bin/relaydock-agent-supervisor[.]sh' \
         '^/usr/local/bin/arcway-expiry-guard([[:space:]]|$)' \
-        '^/usr/local/bin/mmw-agent([[:space:]]|$)'; do
+        '^/usr/local/bin/relaydock-agent([[:space:]]|$)'; do
         pgrep -f "$PROCESS_PATTERN" >/dev/null 2>&1 && VERIFY_FAILED=1
     done
 
     if [ -d /run/systemd/system ]; then
-        systemctl is-active --quiet mmw-agent.service >/dev/null 2>&1 && VERIFY_FAILED=1
+        systemctl is-active --quiet relaydock-agent.service >/dev/null 2>&1 && VERIFY_FAILED=1
         systemctl is-active --quiet arcway-expiry-guard.service >/dev/null 2>&1 && VERIFY_FAILED=1
-        systemctl is-enabled --quiet mmw-agent.service >/dev/null 2>&1 && VERIFY_FAILED=1
+        systemctl is-enabled --quiet relaydock-agent.service >/dev/null 2>&1 && VERIFY_FAILED=1
         systemctl is-enabled --quiet arcway-expiry-guard.service >/dev/null 2>&1 && VERIFY_FAILED=1
     fi
     for BOOT_LINK in \
-        /etc/systemd/system/*target.wants/mmw-agent.service \
+        /etc/systemd/system/*target.wants/relaydock-agent.service \
         /etc/systemd/system/*target.wants/arcway-expiry-guard.service \
-        /etc/runlevels/*/mmw-agent \
+        /etc/runlevels/*/relaydock-agent \
         /etc/runlevels/*/arcway-expiry-guard; do
         verify_removed_path "$BOOT_LINK" || VERIFY_FAILED=1
     done
     if [ -f /etc/rc.local ] && grep -Eq \
-        'arcway-agent-firewall|arcway-nginx-bridge|mmw-agent-supervisor[.]sh|arcway-expiry-guard-supervisor[.]sh' \
+        'arcway-agent-firewall|arcway-nginx-bridge|relaydock-agent-supervisor[.]sh|arcway-expiry-guard-supervisor[.]sh' \
         /etc/rc.local; then
         VERIFY_FAILED=1
     fi
@@ -776,29 +778,30 @@ verify_cleanup() {
 
     # Never delete WARP credentials here. A file appearing after dispatch means
     # a concurrent registration won the race, so completion must fail closed.
-    verify_removed_path /etc/mmw-agent/warp.json || VERIFY_FAILED=1
+    verify_removed_path /etc/relaydock-agent/warp.json || VERIFY_FAILED=1
 
     for OWNED_PATH in \
-        /usr/local/bin/mmw-agent \
-        /usr/local/bin/.mmw-agent.new \
+        /usr/local/bin/relaydock-agent \
+        /usr/local/bin/.relaydock-agent.new \
         /usr/local/bin/arcway-expiry-guard \
         /usr/local/bin/.arcway-expiry-guard.new \
-        /etc/mmw-agent/config.yaml \
+        /etc/relaydock-agent/config.yaml \
+        /etc/relaydock-agent/.relaydock-inbound-mutation-fences.json \
         /etc/arcway-expiry-guard.env \
         /etc/arcway-port-firewall.env \
         /usr/local/sbin/arcway-agent-firewall \
         /usr/local/sbin/arcway-nginx-bridge \
-        /etc/systemd/system/mmw-agent.service \
+        /etc/systemd/system/relaydock-agent.service \
         /etc/systemd/system/arcway-expiry-guard.service \
-        /etc/init.d/mmw-agent \
+        /etc/init.d/relaydock-agent \
         /etc/init.d/arcway-expiry-guard \
-        /usr/local/bin/mmw-agent-supervisor.sh \
+        /usr/local/bin/relaydock-agent-supervisor.sh \
         /usr/local/bin/arcway-expiry-guard-supervisor.sh \
         /www/server/panel/vhost/nginx/zz_arcway_loader.conf \
         /www/server/panel/vhost/nginx/tcp/zz_arcway_loader.conf \
-        /var/lib/mmw-agent \
+        /var/lib/relaydock-agent \
         /var/lib/arcway-expiry-guard \
-        /var/log/mmw-agent; do
+        /var/log/relaydock-agent; do
         verify_removed_path "$OWNED_PATH" || VERIFY_FAILED=1
     done
     for RUNTIME_PATH in "$RUNTIME_DIR"/arcway-agent-firewall.* "$RUNTIME_DIR"/arcway-nginx-bridge.*; do

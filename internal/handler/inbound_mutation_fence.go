@@ -17,9 +17,9 @@ import (
 )
 
 const inboundMutationFenceVersion = 2
-const inboundMutationFenceSidecarName = ".mmwx-inbound-mutation-fences.json"
+const inboundMutationFenceSidecarName = ".relaydock-inbound-mutation-fences.json"
 const unfencedInboundMutationOwner = "-"
-const defaultAgentConfigPath = "/etc/mmw-agent/config.yaml"
+const defaultAgentConfigPath = "/etc/relaydock-agent/config.yaml"
 
 var inboundMutationFenceSyncParent = syncInboundMutationFenceParent
 
@@ -1118,7 +1118,7 @@ func writeInboundMutationFenceFileAtomic(path string, value any) (returnErr erro
 		return err
 	}
 	content = append(content, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".mmwx-inbound-fence-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".relaydock-inbound-fence-*")
 	if err != nil {
 		return err
 	}

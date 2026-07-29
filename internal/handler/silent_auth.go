@@ -31,17 +31,6 @@ func silentAuthenticate(r *http.Request, token string) bool {
 		return true
 	}
 
-	auth := r.Header.Get(constants.HeaderAuthorization)
-	if auth == "" {
-		auth = r.Header.Get(constants.HeaderMMRemoteToken)
-	}
-	if auth == "" {
-		return false
-	}
-
-	if strings.HasPrefix(auth, constants.BearerPrefix) {
-		return strings.TrimPrefix(auth, constants.BearerPrefix) == token
-	}
-
-	return auth == token
+	value, ok := strings.CutPrefix(r.Header.Get(constants.HeaderAuthorization), constants.BearerPrefix)
+	return ok && value == token
 }

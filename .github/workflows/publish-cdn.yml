@@ -28,9 +28,9 @@ jobs:
       TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
       NOTES: ${{ github.event.release.body }}
       URL: ${{ github.event.release.html_url }}
-      PROJECT: mmw-agent
+      PROJECT: relaydock-agent
     steps:
-      - name: Download release assets (mmw-agent-*) — 等 build.yml 传完再下,避免竞态
+      - name: Download release assets (relaydock-agent-*) — 等 build.yml 传完再下,避免竞态
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -38,7 +38,7 @@ jobs:
           # publish-cdn 与 build.yml 都由 release:published 触发,本步可能抢在 build.yml 上传二进制
           # 之前跑 → "no assets to download" 直接失败(R2 一片空)。这里重试等待资产出现(最多 ~10min)。
           for i in $(seq 1 40); do
-            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'mmw-agent-*' --dir dist 2>/dev/null; then
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'relaydock-agent-*' --dir dist 2>/dev/null; then
               echo "第 $i 次尝试:资产已下载"
               break
             fi
@@ -46,8 +46,8 @@ jobs:
             sleep 15
           done
           ls -la dist
-          if ! ls dist/mmw-agent-* >/dev/null 2>&1; then
-            echo "::error::等待超时:release $TAG 仍无 mmw-agent-* 资产(build.yml 可能失败或资产命名变了)"
+          if ! ls dist/relaydock-agent-* >/dev/null 2>&1; then
+            echo "::error::等待超时:release $TAG 仍无 relaydock-agent-* 资产(build.yml 可能失败或资产命名变了)"
             exit 1
           fi
 
@@ -78,7 +78,7 @@ jobs:
           R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          for f in dist/mmw-agent-*; do
+          for f in dist/relaydock-agent-*; do
             [ -f "$f" ] || continue
             name=$(basename "$f")
             aws s3 cp "$f" "s3://$BUCKET/$PROJECT/$name" \

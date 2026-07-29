@@ -1,4 +1,4 @@
-# mmw-agent 配置示例
+# relaydock-agent 配置示例
 
 # Master 服务器地址 (WebSocket/HTTP 模式需要)
 master_url: "http://localhost:8080"

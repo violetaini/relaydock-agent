@@ -62,7 +62,7 @@ func Register(ctx context.Context, publicKey string) (*RegisterResp, error) {
 		"key":   publicKey,
 		"tos":   time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		"type":  "PC",
-		"model": "mmw-agent",
+		"model": "relaydock-agent",
 		"name":  hostname,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, warpAPIBase+"/reg", bytes.NewReader(body))

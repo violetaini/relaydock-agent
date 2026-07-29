@@ -1,13 +1,6 @@
-# mmw-agent Docker 镜像 — embedded xray + 内置 nginx,host 网络模式。
+# relaydock-agent Docker 镜像 — embedded xray + 内置 nginx,host 网络模式。
 #
-# Build:
-#   本地:docker build --build-context xray-core-fork=../xray-core-vision-limiter -t mmw-agent:test .
-#   CI:  workflow 先 clone fork 到 ../xray-core-vision-limiter,再用 --build-context 同上
-#
-# 为什么需要 --build-context xray-core-fork:
-# go.mod 用相对路径 replace github.com/xtls/xray-core => ../xray-core-vision-limiter,
-# build context 默认只含 Dockerfile 所在目录,看不到父级 fork 目录。
-# buildkit 的 --build-context 把 fork 作为附加 context 引入,Dockerfile 内 COPY --from 解构。
+# Build: docker build -t relaydock-agent:test .
 
 # ─── Stage 1: backend builder ───
 FROM golang:1.26-bookworm AS builder
@@ -22,18 +15,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 把 xray-core fork 放到 ../xray-core-vision-limiter,跟 go.mod replace 路径匹配
-COPY --from=xray-core-fork . /build/xray-core-vision-limiter
-
-# mmw-agent 源码本体
-WORKDIR /build/mmw-agent
+# relaydock-agent 源码本体
+WORKDIR /build/relaydock-agent
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
 # 编译 — CGO 关 (纯静态;主控也是这个配置),embedded xray-core 是 Go 库静态链接进来
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-    go build -trimpath -ldflags="-s -w" -o /out/mmw-agent ./cmd/mmw-agent
+    go build -trimpath -ldflags="-s -w" -o /out/relaydock-agent ./cmd/relaydock-agent
 
 # ─── Stage 2: runtime ───
 # Final stage - 用 nginx 官方 Docker base(mainline-bookworm),跟主控 Dockerfile + install-nginx.sh 同款
@@ -66,20 +56,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sfn /etc/nginx/stream_servers /usr/local/nginx/stream_servers \
     && ln -sfn /etc/nginx/html           /usr/local/nginx/html
 
-COPY --from=builder /out/mmw-agent /usr/local/bin/mmw-agent
+COPY --from=builder /out/relaydock-agent /usr/local/bin/relaydock-agent
 
 COPY docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # 默认配置:
 #  - DOCKER=1 让 agent 代码 isDocker() 识别容器环境
-#  - MMWX_XRAY_MODE=embedded 强制 embedded(无外部 xray binary 可装,只能这条路)
-#  - MMWX_REQUIRE_HOST_NETWORK=1 entrypoint 启动时强制检查 host 网络,bridge 模式拒启
+#  - RELAYDOCK_XRAY_MODE=embedded 强制 embedded(无外部 xray binary 可装,只能这条路)
+#  - RELAYDOCK_REQUIRE_HOST_NETWORK=1 entrypoint 启动时强制检查 host 网络,bridge 模式拒启
 ENV DOCKER=1 \
-    MMWX_XRAY_MODE=embedded \
-    MMWX_REQUIRE_HOST_NETWORK=1
+    RELAYDOCK_XRAY_MODE=embedded \
+    RELAYDOCK_REQUIRE_HOST_NETWORK=1
 
-VOLUME ["/etc/mmw-agent", "/usr/local/etc/xray", "/etc/nginx/cert", "/etc/nginx/servers"]
+VOLUME ["/etc/relaydock-agent", "/usr/local/etc/xray", "/etc/nginx/cert", "/etc/nginx/servers"]
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/usr/local/bin/mmw-agent"]
+CMD ["/usr/local/bin/relaydock-agent"]

@@ -1,31 +1,19 @@
 package constants
 
-import (
-	"strings"
-	"time"
-)
+import "time"
 
 const (
 	AgentUserAgent = "relaydock-agent/0.1"
 )
 
-var legacyAgentUserAgent = strings.Join([]string{"miao", "miao", "wu", "x"}, "") + "/0.1"
-
-// AgentWireUserAgent stays compatible with control planes that have not yet
-// rolled forward to the RelayDock identifier.
-func AgentWireUserAgent() string {
-	return legacyAgentUserAgent
-}
-
-// IsAgentUserAgent accepts both sides of the rolling identifier migration.
+// IsAgentUserAgent validates the RelayDock wire identifier.
 func IsAgentUserAgent(value string) bool {
-	return value == AgentUserAgent || value == legacyAgentUserAgent
+	return value == AgentUserAgent
 }
 
 const (
 	HeaderAuthorization = "Authorization"
 	HeaderContentType   = "Content-Type"
-	HeaderMMRemoteToken = "MM-Remote-Token"
 	HeaderUserAgent     = "User-Agent"
 	ContentTypeJSON     = "application/json"
 	BearerPrefix        = "Bearer "

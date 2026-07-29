@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 手动升级 mmw-agent 到 GitHub release(默认 latest,可指定版本如 v0.1.4)。
+# 手动升级 relaydock-agent 到 GitHub release(默认 latest,可指定版本如 v0.1.4)。
 #
 # 适用场景:UI "升级"按钮卡住、agent 进程没换、需要绕过卡死 handler 强制刷新。
 #
@@ -8,18 +8,18 @@
 #   bash upgrade-agent.sh v0.1.4       # 升级到指定 tag
 #
 # 兼容:
-#   - systemd (Debian/Ubuntu/CentOS 等) — systemctl restart mmw-agent
-#   - OpenRC (Alpine LXC 等)            — rc-service mmw-agent restart
+#   - systemd (Debian/Ubuntu/CentOS 等) — systemctl restart relaydock-agent
+#   - OpenRC (Alpine LXC 等)            — rc-service relaydock-agent restart
 #   - 都不在则用 supervise-daemon / 裸 nohup 启动(打印提示由用户接管)
 #
 # 失败兜底:
 #   - 下载失败 → 退出,不动现有 binary
-#   - 替换前自动备份到 /usr/local/bin/mmw-agent.bak-<timestamp>,启动失败可手动回滚
+#   - 替换前自动备份到 /usr/local/bin/relaydock-agent.bak-<timestamp>,启动失败可手动回滚
 #
 set -euo pipefail
 
 REPO="violetaini/relaydock-agent"
-BIN="/usr/local/bin/mmw-agent"
+BIN="/usr/local/bin/relaydock-agent"
 TARGET="${1:-latest}"
 
 err() { echo "[ERROR] $*" >&2; exit 1; }
@@ -70,8 +70,8 @@ CURRENT_VERSION="${CURRENT_VERSION#v}"
 is_stable_version "$CURRENT_VERSION" || err "无法读取当前 Agent 的稳定版本；为防止降级，拒绝自动替换"
 log "当前版本: v$CURRENT_VERSION"
 
-TMP="$(mktemp /tmp/mmw-agent-new.XXXXXX)"
-RELEASE_JSON="$(mktemp /tmp/mmw-agent-release.XXXXXX)"
+TMP="$(mktemp /tmp/relaydock-agent-new.XXXXXX)"
+RELEASE_JSON="$(mktemp /tmp/relaydock-agent-release.XXXXXX)"
 trap 'rm -f "$TMP" "$TMP.sig" "$RELEASE_JSON"' EXIT
 
 # 3. 解析目标版本 path(URL 前缀由镜像链各自接上)。latest 先解析为固定 tag，
@@ -99,7 +99,7 @@ comparison="$(compare_stable_versions "$TARGET_VERSION" "$CURRENT_VERSION")"
 if (( comparison <= 0 )); then
     err "拒绝降级: 目标 v$TARGET_VERSION 不高于当前 v$CURRENT_VERSION"
 fi
-PATH_SUFFIX="releases/download/v${TARGET_VERSION}/mmw-agent-linux-${ARCH_NAME}"
+PATH_SUFFIX="releases/download/v${TARGET_VERSION}/relaydock-agent-linux-${ARCH_NAME}"
 
 # 4. 下载到临时位置(--max-time 防止网络卡死无限等)
 # 镜像链 — GitHub 优先,失败再自动降级到 CDN 代理。纯 v6 机器直连 github 会"network is unreachable"
@@ -176,31 +176,31 @@ log "已替换 $BIN"
 # 7. 重启服务 — 顺序探测,谁活跃用谁
 restarted=0
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
-   && systemctl list-unit-files mmw-agent.service >/dev/null 2>&1; then
-    log "systemd 模式: systemctl restart mmw-agent"
-    systemctl restart mmw-agent
+   && systemctl list-unit-files relaydock-agent.service >/dev/null 2>&1; then
+    log "systemd 模式: systemctl restart relaydock-agent"
+    systemctl restart relaydock-agent
     restarted=1
 elif command -v rc-service >/dev/null 2>&1 \
-     && rc-service --exists mmw-agent 2>/dev/null; then
-    log "OpenRC 模式: rc-service mmw-agent restart"
-    rc-service mmw-agent restart
+     && rc-service --exists relaydock-agent 2>/dev/null; then
+    log "OpenRC 模式: rc-service relaydock-agent restart"
+    rc-service relaydock-agent restart
     restarted=1
-elif pgrep -f "/usr/local/bin/mmw-agent" >/dev/null 2>&1; then
+elif pgrep -f "/usr/local/bin/relaydock-agent" >/dev/null 2>&1; then
     # 裸 nohup 模式 — kill 老进程,新 binary 需要用户原命令再启
-    log "[WARN] 检测到非 systemd/OpenRC 模式 mmw-agent 进程,本脚本不自动重启"
-    log "[WARN] 请你手动:pkill -f /usr/local/bin/mmw-agent && nohup /usr/local/bin/mmw-agent -c <config> &"
+    log "[WARN] 检测到非 systemd/OpenRC 模式 relaydock-agent 进程,本脚本不自动重启"
+    log "[WARN] 请你手动:pkill -f /usr/local/bin/relaydock-agent && nohup /usr/local/bin/relaydock-agent -c <config> &"
 else
-    log "[WARN] 未检测到 mmw-agent 进程或服务,二进制已替换但需要手动启动"
+    log "[WARN] 未检测到 relaydock-agent 进程或服务,二进制已替换但需要手动启动"
 fi
 
 # 8. 验证
 sleep 3
 if [ $restarted -eq 1 ]; then
-    if pgrep -f "/usr/local/bin/mmw-agent" >/dev/null 2>&1; then
+    if pgrep -f "/usr/local/bin/relaydock-agent" >/dev/null 2>&1; then
         log "✅ 升级完成,agent 正在运行"
     else
-        log "[ERROR] agent 进程未起来,查看 journalctl -u mmw-agent / /var/log/mmw-agent.log 排查"
-        log "[ERROR] 回滚命令: mv $BAK $BIN && systemctl restart mmw-agent  # 或 rc-service mmw-agent restart"
+        log "[ERROR] agent 进程未起来,查看 journalctl -u relaydock-agent / /var/log/relaydock-agent/relaydock-agent.log 排查"
+        log "[ERROR] 回滚命令: mv $BAK $BIN && systemctl restart relaydock-agent  # 或 rc-service relaydock-agent restart"
         exit 1
     fi
 fi

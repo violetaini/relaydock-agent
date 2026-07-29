@@ -336,7 +336,7 @@ func NewClient(cfg *config.Config) *Client {
 // 生成 WebSocket 握手请求头。
 func (c *Client) wsHeaders() http.Header {
 	h := http.Header{}
-	h.Set(constants.HeaderUserAgent, constants.AgentWireUserAgent())
+	h.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
 	return h
 }
 
@@ -354,7 +354,7 @@ func (c *Client) newRequest(ctx context.Context, method, urlStr string, body []b
 	}
 	req.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
 	req.Header.Set(constants.HeaderAuthorization, constants.BearerPrefix+c.config.Token)
-	req.Header.Set(constants.HeaderUserAgent, constants.AgentWireUserAgent())
+	req.Header.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
 	return req, nil
 }
 
@@ -2659,7 +2659,7 @@ func (c *Client) persistConfigField(key, value string) error {
 	}
 	cfgPath := c.configPath
 	if cfgPath == "" {
-		cfgPath = "/etc/mmw-agent/config.yaml"
+		cfgPath = "/etc/relaydock-agent/config.yaml"
 	}
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		return nil

@@ -8,13 +8,11 @@ import (
 	"time"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
-	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/core"
 	feature_inbound "github.com/xtls/xray-core/features/inbound"
 	feature_outbound "github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/stats"
-	xproxy "github.com/xtls/xray-core/proxy"
 
 	mydispatcher "github.com/violetaini/relaydock-agent/internal/dispatcher"
 	"github.com/violetaini/relaydock-agent/internal/limiter"
@@ -73,25 +71,7 @@ func (e *EmbeddedXray) Start() (retErr error) {
 	}
 	e.mu.Unlock()
 
-	// 注册 vision splice 后的 conn-wrap 钩子,让 xtls-rprx-vision 节点的限速也能生效。
-	// hook 闭包持有 EmbeddedXray 引用,每次 splice 触发时按 email 查 per-user rate.Limiter;
-	// 拿不到 limiter (limit=0 或用户已被踢) 时返回 nil,vision 走原零拷贝路径,无开销。
-	// 重启 mmw-agent 时 instance 重新初始化,旧 limiter 引用会被新 hook 覆盖。
-	xproxy.SetVisionLimiterHook(func(email string, rawConn xnet.Conn) xnet.Conn {
-		l := e.GetLimiter()
-		if l == nil {
-			log.Printf("[VisionLimiter] %s: skip (limiter not ready)", email)
-			return nil
-		}
-		bucket := l.LookupBucketByEmail(email)
-		if bucket == nil {
-			// 无限速用户走原零拷贝 splice 路径。这是每条连接热路径,不打日志(默认 VLESS-Vision 协议会刷爆)。
-			return nil
-		}
-		return limiter.NewRateLimitedConn(rawConn, bucket)
-	})
-
-	log.Printf("[EmbeddedXray] Started successfully (vision limiter hook registered)")
+	log.Printf("[EmbeddedXray] Started successfully")
 	return nil
 }
 

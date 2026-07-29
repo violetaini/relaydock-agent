@@ -303,15 +303,8 @@ func (d *Dispatcher) DispatchLink(ctx context.Context, destination net.Destinati
 	if !destination.IsValid() {
 		return errors.New("Dispatcher: Invalid destination.")
 	}
-	// 禁用 vision splice 优化的 OS 级 splice syscall (CanSpliceCopy=1 那条快路径)。
-	// vless inbound (XRV flow) 进入 dispatcher 前已经把 inbound.CanSpliceCopy 设为 2;
-	// 不在这里改为 3,vision 协议在 WriteMultiBuffer 走 line 339-340 会保留 spliceReadyInbound,
-	// 然后写完 31 字节切换指令后立刻把 CanSpliceCopy 升级为 1 触发 kernel splice,**完全绕过 RateLimitedConn**。
-	// 强制设为 3 (disable splice) 让数据全程走 user-space buf.Writer/conn.Write,vision_limiter_hook
-	// 包的 wrap conn 才能拦截读写。详见 XrayR PR #757 + xray-core issue #3100。
 	si := session.InboundFromContext(ctx)
 	if si != nil {
-		si.CanSpliceCopy = 3
 		// 连接数限制:DispatchLink 是 VLESS 等的真实数据路径(不经 getLink),必须在这里也做满额拒绝,
 		// 否则限制形同虚设(历史 device_limit 同样只挂在 getLink,对 DispatchLink 路径无效)。
 		if si.User != nil && len(si.User.Email) > 0 {

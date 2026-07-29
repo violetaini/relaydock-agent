@@ -34,7 +34,7 @@ type InboundInfo struct {
 	Tag            string
 	NodeSpeedLimit uint64    // Bytes/s, 0 = unlimited
 	UserInfo       *sync.Map // key: "tag|email|uid" -> UserInfo (GetUserBucket 用 "tag|email|" 前缀匹配)
-	BucketHub      *sync.Map // key: email -> *rate.Limiter (与 GetUserBucket/SetUserSpeed/LookupBucketByEmail 一致)
+	BucketHub      *sync.Map // key: email -> *rate.Limiter (与 GetUserBucket/SetUserSpeed 一致)
 	UserOnlineIP   *sync.Map // key: email -> *emailIPMap (内层 ip -> *ipEntry + mu)
 }
 

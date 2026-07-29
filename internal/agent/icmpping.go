@@ -105,7 +105,7 @@ func icmpPing(host string, timeout time.Duration) (time.Duration, error) {
 
 	seq := int(atomic.AddUint32(&icmpSeq, 1) & 0xffff)
 	// payload 里放一个 magic,回包匹配时校验,避免收到别的进程的 echo reply。
-	payload := []byte("mmw-agent-probe--")
+	payload := []byte("relaydock-agent-probe--")
 	msg := icmp.Message{
 		Type: msgType,
 		Code: 0,
