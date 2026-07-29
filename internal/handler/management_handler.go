@@ -2131,10 +2131,12 @@ func (h *ManageHandler) saveNginxConfigFile(w http.ResponseWriter, r *http.Reque
 
 // InboundRequest 表示入站管理请求。
 type InboundRequest struct {
-	Action     string                 `json:"action"`
-	Inbound    map[string]interface{} `json:"inbound,omitempty"`
-	Tag        string                 `json:"tag,omitempty"`
-	MutationID string                 `json:"mutation_id,omitempty"`
+	Action                string                 `json:"action"`
+	Inbound               map[string]interface{} `json:"inbound,omitempty"`
+	Tag                   string                 `json:"tag,omitempty"`
+	MutationID            string                 `json:"mutation_id,omitempty"`
+	ExpectedMutationOwner *string                `json:"expected_mutation_owner,omitempty"`
+	ExpectedInboundDigest string                 `json:"expected_inbound_digest,omitempty"`
 	// 仅 action=add-client/remove-client 使用:要新增 / 匹配移除的单个客户端凭据。
 	// add 场景按协议放进 settings.clients(VLESS/VMess/Trojan/Hysteria/Shadowsocks)
 	// 或 settings.accounts(SOCKS/HTTP);remove 场景按 matchCredentialMap 同字段匹配。

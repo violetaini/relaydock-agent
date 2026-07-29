@@ -81,6 +81,98 @@ func TestInboundMutationFenceAllowsLegacyRemoveWithoutOwner(t *testing.T) {
 	}
 }
 
+func TestInboundMutationFenceConditionalReplacementCAS(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "xray-config.json")
+	previousInbound := map[string]interface{}{"tag": "legacy-wireguard", "port": float64(51820)}
+	intendedInbound := map[string]interface{}{"tag": "legacy-wireguard", "port": float64(51821)}
+	writeInboundMutationTestConfig(t, configPath, previousInbound)
+	previousDigest, err := canonicalInboundMutationDigest(previousInbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyOwner := ""
+
+	handler := newInboundMutationFenceTestHandler(filepath.Join(directory, "inbound-fences.json"))
+	handler.inboundsMu.Lock()
+	transaction, err := handler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID:            "managed-wireguard:legacy-generation",
+		ExpectedMutationOwner: &emptyOwner,
+		ExpectedInboundDigest: previousDigest,
+		Inbound:               intendedInbound,
+	}, configPath, previousInbound)
+	if err == nil {
+		err = handler.rollbackInboundMutationLocked(transaction)
+	}
+	handler.inboundsMu.Unlock()
+	if err != nil {
+		t.Fatalf("matching conditional replacement failed: %v", err)
+	}
+
+	currentOwner := "managed-wireguard:current-generation"
+	ownedHandler := loadedInboundMutationFenceTestHandler(
+		filepath.Join(directory, "owned-inbound-fences.json"),
+		"legacy-wireguard",
+		currentOwner,
+	)
+	ownedHandler.inboundsMu.Lock()
+	ownedTransaction, ownedErr := ownedHandler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID:            currentOwner,
+		ExpectedMutationOwner: &currentOwner,
+		ExpectedInboundDigest: previousDigest,
+		Inbound:               intendedInbound,
+	}, configPath, previousInbound)
+	if ownedErr == nil {
+		ownedErr = ownedHandler.rollbackInboundMutationLocked(ownedTransaction)
+	}
+	ownedHandler.inboundsMu.Unlock()
+	if ownedErr != nil {
+		t.Fatalf("matching owned conditional replacement failed: %v", ownedErr)
+	}
+
+	ownerHandler := loadedInboundMutationFenceTestHandler(
+		filepath.Join(directory, "owner-inbound-fences.json"),
+		"legacy-wireguard",
+		"managed-wireguard:newer-generation",
+	)
+	ownerHandler.inboundsMu.Lock()
+	_, ownerErr := ownerHandler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID:            "managed-wireguard:legacy-generation",
+		ExpectedMutationOwner: &emptyOwner,
+		ExpectedInboundDigest: previousDigest,
+		Inbound:               intendedInbound,
+	}, configPath, previousInbound)
+	ownerHandler.inboundsMu.Unlock()
+	if ownerErr == nil || !strings.Contains(ownerErr.Error(), "owner changed") {
+		t.Fatalf("changed owner was not rejected: %v", ownerErr)
+	}
+
+	digestHandler := newInboundMutationFenceTestHandler(filepath.Join(directory, "digest-inbound-fences.json"))
+	digestHandler.inboundsMu.Lock()
+	_, digestErr := digestHandler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID:            "managed-wireguard:legacy-generation",
+		ExpectedMutationOwner: &emptyOwner,
+		ExpectedInboundDigest: strings.Repeat("0", 64),
+		Inbound:               intendedInbound,
+	}, configPath, previousInbound)
+	digestHandler.inboundsMu.Unlock()
+	if digestErr == nil || !strings.Contains(digestErr.Error(), "changed before conditional replacement") {
+		t.Fatalf("changed inbound digest was not rejected: %v", digestErr)
+	}
+
+	digestOnlyHandler := newInboundMutationFenceTestHandler(filepath.Join(directory, "digest-only-inbound-fences.json"))
+	digestOnlyHandler.inboundsMu.Lock()
+	_, digestOnlyErr := digestOnlyHandler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID:            "managed-wireguard:legacy-generation",
+		ExpectedInboundDigest: previousDigest,
+		Inbound:               intendedInbound,
+	}, configPath, previousInbound)
+	digestOnlyHandler.inboundsMu.Unlock()
+	if digestOnlyErr == nil || !strings.Contains(digestOnlyErr.Error(), "requires an expected mutation owner") {
+		t.Fatalf("digest without expected owner was not rejected: %v", digestOnlyErr)
+	}
+}
+
 func TestInboundMutationFenceRequiresExactSentinelOwner(t *testing.T) {
 	handler := loadedInboundMutationFenceTestHandler(
 		filepath.Join(t.TempDir(), "inbound-fences.json"),
