@@ -3,7 +3,7 @@ package embedded
 import (
 	"strings"
 
-	"mmw-agent/internal/collector"
+	"github.com/violetaini/relaydock-agent/internal/collector"
 
 	"github.com/xtls/xray-core/features/stats"
 )

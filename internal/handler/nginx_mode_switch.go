@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 // HandleSwitchNginxMode persists the ownership boundary before acknowledging

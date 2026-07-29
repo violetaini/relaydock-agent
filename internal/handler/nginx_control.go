@@ -4,12 +4,12 @@ import (
 	"os/exec"
 	"strings"
 
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/util"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/util"
 )
 
 // Docker 镜像里没有 systemd,所有 systemctl 控制 nginx/xray 的逻辑在 docker 模式下走 binary 直接命令。
-// 裸机部署不变(走原 systemctl 路径)。设计跟主控 miaomiaowuX ensureNginxRunning 完全对称。
+// 裸机部署不变(走原 systemctl 路径)。设计跟 RelayDock 主控 ensureNginxRunning 完全对称。
 
 // findNginxBinary 找 nginx 可执行文件路径,跟 reloadNginx 复用同一搜索列表
 // (constants.NginxBinarySearchPaths 含 /usr/local/nginx/sbin/nginx, /usr/sbin/nginx 等)。

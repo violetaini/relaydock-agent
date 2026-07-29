@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"mmw-agent/internal/config"
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/config"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 func TestConfigUpdatePersistsNginxModeAndUpdatesHook(t *testing.T) {

@@ -3,7 +3,7 @@ package handler
 import (
 	"path/filepath"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 // nginxWriteDirs 汇总 nginx 配置的合法写入根目录。主控正常下发的 nginx 配置只会落在这些目录;

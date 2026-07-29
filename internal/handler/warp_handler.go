@@ -17,9 +17,9 @@ import (
 	"net/http"
 	"time"
 
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/warp"
-	"mmw-agent/internal/xrpc"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/warp"
+	"github.com/violetaini/relaydock-agent/internal/xrpc"
 )
 
 // WarpHandler 持有 warp service + 一个回调用于复用 ManageHandler 的 outbound 管理能力。
@@ -287,7 +287,7 @@ func (h *WarpHandler) auth(r *http.Request) bool {
 	if r.Header.Get("X-WS-RPC") == "1" && r.RemoteAddr == "ws-rpc" {
 		return true
 	}
-	if r.Header.Get(constants.HeaderUserAgent) != constants.AgentUserAgent {
+	if !constants.IsAgentUserAgent(r.Header.Get(constants.HeaderUserAgent)) {
 		return false
 	}
 	if h.configToken == "" {

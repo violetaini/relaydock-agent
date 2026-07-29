@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 func TestHandleSwitchNginxModePersistsBeforeAcknowledging(t *testing.T) {

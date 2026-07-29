@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"mmw-agent/internal/agent"
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/agent"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 type DomainLatencyProbeRequest struct {

@@ -14,7 +14,7 @@ import (
 	"github.com/xtls/xray-core/app/metrics"
 	"github.com/xtls/xray-core/app/policy"
 
-	mydispatcher "mmw-agent/internal/dispatcher"
+	mydispatcher "github.com/violetaini/relaydock-agent/internal/dispatcher"
 )
 
 // TestConfigJSON 用 xray-core 库语义验证一份 JSON 配置:
@@ -105,9 +105,9 @@ func buildCoreConfig(configPath string) (*core.Config, error) {
 	skipTypes := map[string]bool{
 		serial.GetMessageType(&officialdispatcher.Config{}): true,
 		serial.GetMessageType(&officialstats.Config{}):      true,
-		serial.GetMessageType(&policy.Config{}):              true,
-		serial.GetMessageType(&mydispatcher.Config{}):        true,
-		serial.GetMessageType(&metrics.Config{}):             true,
+		serial.GetMessageType(&policy.Config{}):             true,
+		serial.GetMessageType(&mydispatcher.Config{}):       true,
+		serial.GetMessageType(&metrics.Config{}):            true,
 	}
 	for _, app := range pbConfig.App {
 		if !skipTypes[app.Type] {

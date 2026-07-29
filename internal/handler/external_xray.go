@@ -6,7 +6,7 @@ package handler
 //   - 把 confdir 内 *.json 备份到一个隐藏目录,让重启后 xray 不再读多片配置
 //   - 重启 xray(由调用方走的 mode 决定:embedded / external)
 //
-// 触发场景:从妙妙屋(mmw)迁移到妙妙屋X 时,被妙妙屋管理过的外置 xray 通常用
+// 触发场景:从旧版面板迁移到 RelayDock 时,被旧版面板管理过的外置 xray 通常用
 // `-config FILE -confdir DIR` 多片配置启动;mmwx 主控的 /api/child/inbounds 等接口
 // 只读写单个 config 文件,如不合并就会出现"接口改的 client/inbound 丢失"。
 
@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"mmw-agent/internal/discovery"
+	"github.com/violetaini/relaydock-agent/internal/discovery"
 )
 
 type takeoverExternalXrayResp struct {

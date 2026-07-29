@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一键发布脚本（对标 miaomiaowux/scripts/release.sh）
+# RelayDock Agent 一键发布脚本
 # 流程：bump version -> 更新 README changelog -> commit -> tag -> push -> 创建 GitHub Release
 # 用法：
 #   bash scripts/release.sh            # patch +1（默认）

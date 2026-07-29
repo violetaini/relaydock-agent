@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"mmw-agent/internal/linespeed"
+	"github.com/violetaini/relaydock-agent/internal/linespeed"
 )
 
 type lineSpeedService interface {

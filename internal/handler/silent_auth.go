@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 func SilentAuthMiddleware(token string, next http.Handler) http.Handler {
@@ -23,7 +23,7 @@ func SilentAuthMiddleware(token string, next http.Handler) http.Handler {
 }
 
 func silentAuthenticate(r *http.Request, token string) bool {
-	if r.Header.Get(constants.HeaderUserAgent) != constants.AgentUserAgent {
+	if !constants.IsAgentUserAgent(r.Header.Get(constants.HeaderUserAgent)) {
 		return false
 	}
 

@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 
+	"github.com/violetaini/relaydock-agent/internal/constants"
+
 	"github.com/xtls/xray-core/app/proxyman/command"
 	cnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
@@ -81,7 +83,7 @@ func AddHTTPOutbound(ctx context.Context, client command.HandlerServiceClient, t
 		serial.ToTypedMessage(&http.ClientConfig{
 			Server: endpoint("example.com", 80, nil),
 			Header: []*http.Header{
-				{Key: "User-Agent", Value: "miaomiaowu"},
+				{Key: "User-Agent", Value: constants.AgentWireUserAgent()},
 			},
 		}),
 	)

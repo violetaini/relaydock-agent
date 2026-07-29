@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"time"
 
-	"mmw-agent/internal/discovery"
+	"github.com/violetaini/relaydock-agent/internal/discovery"
 )
 
 // RestartXray restarts xray using the specified method.

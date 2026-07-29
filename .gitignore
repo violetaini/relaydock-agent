@@ -36,8 +36,8 @@ internal/web/dist
 data/*
 .vscode
 VERSION.md
-miaomiaowu.db
-miaomiaowux-frontend/.vite
+relaydock.db
+relaydock-frontend/.vite
 .idea
 VALIDATION_INTEGRATION_PLAN.md
 CLAUDE.md
@@ -46,9 +46,13 @@ sign-local.sh
 *_test.go
 !internal/agent/nginx_mode_test.go
 !internal/agent/cert_reload_test.go
+!internal/agent/user_agent_compat_test.go
+!internal/constants/user_agent_test.go
 !internal/handler/nginx_reuse_test.go
 !internal/handler/nginx_reuse_integration_test.go
 !internal/handler/nginx_mode_switch_test.go
 !internal/handler/agent_upgrade_guard_test.go
 !internal/handler/inbound_mutation_fence_test.go
+!internal/handler/user_agent_compat_test.go
 !internal/version/compare_test.go
+!internal/xrpc/services/handler/outbound_test.go

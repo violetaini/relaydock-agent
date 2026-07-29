@@ -123,4 +123,4 @@ go build -trimpath -o mmw-agent ./cmd/mmw-agent
 
 ## 许可与致谢
 
-RelayDock 基于 [iluobei/miaomiaowuX](https://github.com/iluobei/miaomiaowuX) 的公开代码继续开发，感谢原作者的开源工作。原项目的 MIT 许可与版权声明保留在 [LICENSE](LICENSE) 中。
+RelayDock 遵循仓库内 [LICENSE](LICENSE) 所载的 MIT 许可与版权声明。

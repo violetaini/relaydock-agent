@@ -20,14 +20,14 @@ import (
 	"syscall"
 	"time"
 
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/discovery"
-	"mmw-agent/internal/embedded"
-	"mmw-agent/internal/limiter"
-	"mmw-agent/internal/util"
-	"mmw-agent/internal/version"
-	"mmw-agent/internal/xrayctl"
-	"mmw-agent/internal/xrpc"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/discovery"
+	"github.com/violetaini/relaydock-agent/internal/embedded"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
+	"github.com/violetaini/relaydock-agent/internal/util"
+	"github.com/violetaini/relaydock-agent/internal/version"
+	"github.com/violetaini/relaydock-agent/internal/xrayctl"
+	"github.com/violetaini/relaydock-agent/internal/xrpc"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
 	"github.com/xtls/xray-core/core"
@@ -393,7 +393,7 @@ func (h *ManageHandler) authenticate(r *http.Request) bool {
 		return true
 	}
 
-	if r.Header.Get(constants.HeaderUserAgent) != constants.AgentUserAgent {
+	if !constants.IsAgentUserAgent(r.Header.Get(constants.HeaderUserAgent)) {
 		return false
 	}
 
@@ -1365,7 +1365,7 @@ func (h *ManageHandler) HandleNginxInstall(w http.ResponseWriter, r *http.Reques
 		defer nginxInstalling.Store(false)
 
 		cmd := exec.Command("bash", "-c",
-			`curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install-nginx.sh | bash`)
+			`curl -fsSL https://raw.githubusercontent.com/violetaini/relaydock/main/install-nginx.sh | bash`)
 		cmd.Env = os.Environ()
 
 		var stdout, stderr bytes.Buffer
@@ -1407,7 +1407,7 @@ func (h *ManageHandler) HandleNginxRemove(w http.ResponseWriter, r *http.Request
 	log.Printf("[Manage] Removing Nginx...")
 
 	cmd := exec.Command("bash", "-c",
-		`curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/uninstall-nginx.sh | bash -s -- -y`)
+		`curl -fsSL https://raw.githubusercontent.com/violetaini/relaydock/main/uninstall-nginx.sh | bash -s -- -y`)
 	cmd.Env = os.Environ()
 
 	var stdout, stderr bytes.Buffer
@@ -5940,7 +5940,7 @@ func (h *ManageHandler) HandleNginxInstallStream(w http.ResponseWriter, r *http.
 
 	log.Printf("[Manage] Starting Nginx install (stream)...")
 	cmd := exec.CommandContext(r.Context(), "bash", "-c",
-		`set -e; SCRIPT=$(mktemp); curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install-nginx.sh -o "$SCRIPT"; bash "$SCRIPT"; rm -f "$SCRIPT"`)
+		`set -e; SCRIPT=$(mktemp); curl -fsSL https://raw.githubusercontent.com/violetaini/relaydock/main/install-nginx.sh -o "$SCRIPT"; bash "$SCRIPT"; rm -f "$SCRIPT"`)
 	cmd.Env = os.Environ()
 	sseStreamCmd(w, r, cmd, "Nginx installed successfully")
 
@@ -5963,7 +5963,7 @@ func (h *ManageHandler) HandleNginxRemoveStream(w http.ResponseWriter, r *http.R
 	}
 	log.Printf("[Manage] Starting Nginx remove (stream)...")
 	cmd := exec.CommandContext(r.Context(), "bash", "-c",
-		`curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/uninstall-nginx.sh | bash -s -- -y`)
+		`curl -fsSL https://raw.githubusercontent.com/violetaini/relaydock/main/uninstall-nginx.sh | bash -s -- -y`)
 	cmd.Env = os.Environ()
 	sseStreamCmd(w, r, cmd, "Nginx removed successfully")
 }
@@ -6603,7 +6603,7 @@ func (h *ManageHandler) ensureExternalXray() error {
 // 段数判断稳:simpleSlug 把非 [a-z0-9-] 全换成 -,labelSlug 不含冒号,所以
 // "routed:" 前缀 + ":" 段数 = 3 或 4 可唯一区分 admin vs user。
 // 不依赖 ":u" 前缀 — 避免 admin 起 label 叫 "unlock" 时被误判成 user。
-// outboundTag = "tunnel-*" 是 miaomiaowuX 端口转发的命名约定(见前端 inbound-wizard generateTunnelTag),
+// outboundTag = "tunnel-*" 是 RelayDock 端口转发的命名约定(见前端 inbound-wizard generateTunnelTag),
 // 单独提到 priority 0 是因为 xray routing 按数组顺序短路匹配,这类规则若被 routed/warp 截胡,
 // 端口转发的语义就丢了。注意 "tunnel-in" 是 inboundTag(伪装入站),不会出现在 outboundTag,排除安全。
 //

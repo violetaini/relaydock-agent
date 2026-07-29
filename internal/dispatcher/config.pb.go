@@ -108,7 +108,7 @@ const file_internal_dispatcher_config_proto_rawDesc = "" +
 	" internal/dispatcher/config.proto\x12\x12mmw.app.dispatcher\"\x15\n" +
 	"\rSessionConfigJ\x04\b\x01\x10\x02\"G\n" +
 	"\x06Config\x12=\n" +
-	"\bsettings\x18\x01 \x01(\v2!.mmw.app.dispatcher.SessionConfigR\bsettingsB\x1fZ\x1dmmw-agent/internal/dispatcherb\x06proto3"
+	"\bsettings\x18\x01 \x01(\v2!.mmw.app.dispatcher.SessionConfigR\bsettingsB\x3bZ\x39github.com/violetaini/relaydock-agent/internal/dispatcherb\x06proto3"
 
 var (
 	file_internal_dispatcher_config_proto_rawDescOnce sync.Once

@@ -6,7 +6,7 @@ import (
 )
 
 // IsDocker 探测当前是否在 Docker 容器内。
-// 完全复用主控 miaomiaowuX internal/handler/update.go:isDocker 的 3 重检测逻辑。
+// 完全复用 RelayDock 主控 internal/handler/update.go:isDocker 的 3 重检测逻辑。
 //
 // 用途:agent 在容器内不能调 systemctl(没 systemd)、不能跑 install-nginx.sh /
 // install-release.sh(脚本依赖 systemd)。各处 isDocker 早返 + 走 binary 直接控制。

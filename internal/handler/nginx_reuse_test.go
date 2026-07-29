@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 func TestNginxHTTPIncludePatternsExcludesStreamIncludes(t *testing.T) {

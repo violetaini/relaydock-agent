@@ -25,19 +25,19 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"mmw-agent/internal/agent"
-	"mmw-agent/internal/agentfirewall"
-	"mmw-agent/internal/config"
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/discovery"
-	"mmw-agent/internal/embedded"
-	"mmw-agent/internal/handler"
-	"mmw-agent/internal/linespeed"
-	"mmw-agent/internal/securechan"
-	"mmw-agent/internal/selfupdate"
-	"mmw-agent/internal/util"
-	"mmw-agent/internal/version"
-	"mmw-agent/internal/warp"
+	"github.com/violetaini/relaydock-agent/internal/agent"
+	"github.com/violetaini/relaydock-agent/internal/agentfirewall"
+	"github.com/violetaini/relaydock-agent/internal/config"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/discovery"
+	"github.com/violetaini/relaydock-agent/internal/embedded"
+	"github.com/violetaini/relaydock-agent/internal/handler"
+	"github.com/violetaini/relaydock-agent/internal/linespeed"
+	"github.com/violetaini/relaydock-agent/internal/securechan"
+	"github.com/violetaini/relaydock-agent/internal/selfupdate"
+	"github.com/violetaini/relaydock-agent/internal/util"
+	"github.com/violetaini/relaydock-agent/internal/version"
+	"github.com/violetaini/relaydock-agent/internal/warp"
 )
 
 // setupLogging 把日志输出切到 lumberjack 文件 + stdout。

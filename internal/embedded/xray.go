@@ -16,8 +16,8 @@ import (
 	"github.com/xtls/xray-core/features/stats"
 	xproxy "github.com/xtls/xray-core/proxy"
 
-	mydispatcher "mmw-agent/internal/dispatcher"
-	"mmw-agent/internal/limiter"
+	mydispatcher "github.com/violetaini/relaydock-agent/internal/dispatcher"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
 )
 
 type EmbeddedXray struct {
@@ -329,7 +329,7 @@ func (e *EmbeddedXray) GetTraffic(name string) int64 {
 }
 
 var (
-	errNotRunning    = &EmbeddedError{"xray instance not running"}
+	errNotRunning     = &EmbeddedError{"xray instance not running"}
 	errInvalidHandler = &EmbeddedError{"created object is not a valid handler"}
 )
 
@@ -338,4 +338,3 @@ type EmbeddedError struct {
 }
 
 func (e *EmbeddedError) Error() string { return e.msg }
-

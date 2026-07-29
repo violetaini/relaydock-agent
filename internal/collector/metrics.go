@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 // XrayMetrics 表示 Xray /debug/vars 的响应结构。

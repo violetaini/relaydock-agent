@@ -3,7 +3,7 @@ package stats
 import (
 	"context"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 
 	statspb "github.com/xtls/xray-core/app/stats/command"
 )

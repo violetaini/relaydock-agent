@@ -25,7 +25,7 @@ import (
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/pipe"
 
-	"mmw-agent/internal/limiter"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
 )
 
 var errSniffingTimeout = errors.New("timeout on sniffing")

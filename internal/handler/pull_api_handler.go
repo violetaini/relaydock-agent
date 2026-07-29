@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"mmw-agent/internal/agent"
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/agent"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 // APIHandler 处理来自主控端的请求（拉取模式）。
@@ -90,7 +90,7 @@ func (h *APIHandler) ServeSpeedHTTP(w http.ResponseWriter, r *http.Request) {
 
 // 校验请求身份（token + User-Agent）。
 func (h *APIHandler) authenticate(r *http.Request) bool {
-	if r.Header.Get(constants.HeaderUserAgent) != constants.AgentUserAgent {
+	if !constants.IsAgentUserAgent(r.Header.Get(constants.HeaderUserAgent)) {
 		return false
 	}
 

@@ -22,16 +22,16 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 
-	"mmw-agent/internal/collector"
-	"mmw-agent/internal/config"
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/discovery"
-	"mmw-agent/internal/embedded"
-	"mmw-agent/internal/limiter"
-	"mmw-agent/internal/securechan"
-	"mmw-agent/internal/util"
-	"mmw-agent/internal/version"
-	"mmw-agent/internal/xrayconf"
+	"github.com/violetaini/relaydock-agent/internal/collector"
+	"github.com/violetaini/relaydock-agent/internal/config"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/discovery"
+	"github.com/violetaini/relaydock-agent/internal/embedded"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
+	"github.com/violetaini/relaydock-agent/internal/securechan"
+	"github.com/violetaini/relaydock-agent/internal/util"
+	"github.com/violetaini/relaydock-agent/internal/version"
+	"github.com/violetaini/relaydock-agent/internal/xrayconf"
 
 	"github.com/gorilla/websocket"
 )
@@ -336,7 +336,7 @@ func NewClient(cfg *config.Config) *Client {
 // 生成 WebSocket 握手请求头。
 func (c *Client) wsHeaders() http.Header {
 	h := http.Header{}
-	h.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
+	h.Set(constants.HeaderUserAgent, constants.AgentWireUserAgent())
 	return h
 }
 
@@ -354,7 +354,7 @@ func (c *Client) newRequest(ctx context.Context, method, urlStr string, body []b
 	}
 	req.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
 	req.Header.Set(constants.HeaderAuthorization, constants.BearerPrefix+c.config.Token)
-	req.Header.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
+	req.Header.Set(constants.HeaderUserAgent, constants.AgentWireUserAgent())
 	return req, nil
 }
 

@@ -3,7 +3,7 @@ package logger
 import (
 	"context"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 
 	loggerpb "github.com/xtls/xray-core/app/log/command"
 )

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/discovery"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/discovery"
 
 	"gopkg.in/yaml.v3"
 )

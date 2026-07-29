@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"mmw-agent/internal/constants"
-	"mmw-agent/internal/securechan"
+	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/securechan"
 )
 
 // CryptoMiddleware 为 Pull 模式提供请求/响应加密。

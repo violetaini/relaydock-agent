@@ -71,5 +71,5 @@ import (
 	_ "github.com/xtls/xray-core/main/confloader/external"
 
 	// Custom dispatcher with limiter support (registers via init())
-	_ "mmw-agent/internal/dispatcher"
+	_ "github.com/violetaini/relaydock-agent/internal/dispatcher"
 )

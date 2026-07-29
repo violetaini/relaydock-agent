@@ -1,4 +1,4 @@
-module mmw-agent
+module github.com/violetaini/relaydock-agent
 
 go 1.26
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 const (

@@ -3,7 +3,7 @@ package handler
 import (
 	"net/http"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 // 注册子端 API 路由

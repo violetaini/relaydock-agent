@@ -3,7 +3,7 @@ package discovery
 import (
 	"os"
 
-	"mmw-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/constants"
 )
 
 // Discover finds xray config paths using a 3-tier approach:

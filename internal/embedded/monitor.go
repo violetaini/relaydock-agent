@@ -5,17 +5,17 @@ import (
 	"sync"
 	"time"
 
-	"mmw-agent/internal/limiter"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
 )
 
 type AutoSpeedLimitRule struct {
-	Type             string  `json:"type"`               // "sustained" | "burst"
-	ThresholdMbps    float64 `json:"threshold_mbps"`     // 触发阈值 (Mbps)
-	SustainedSeconds int     `json:"sustained_seconds"`  // sustained: 持续时长; burst: 单次最短时长
-	WindowSeconds    int     `json:"window_seconds"`     // burst: 时间窗口
-	BurstCount       int     `json:"burst_count"`        // burst: 窗口内触发次数
-	LimitMbps        float64 `json:"limit_mbps"`         // 限速后速率 (Mbps)
-	LimitDuration    int     `json:"limit_duration"`     // 限速持续时间 (秒)
+	Type             string  `json:"type"`              // "sustained" | "burst"
+	ThresholdMbps    float64 `json:"threshold_mbps"`    // 触发阈值 (Mbps)
+	SustainedSeconds int     `json:"sustained_seconds"` // sustained: 持续时长; burst: 单次最短时长
+	WindowSeconds    int     `json:"window_seconds"`    // burst: 时间窗口
+	BurstCount       int     `json:"burst_count"`       // burst: 窗口内触发次数
+	LimitMbps        float64 `json:"limit_mbps"`        // 限速后速率 (Mbps)
+	LimitDuration    int     `json:"limit_duration"`    // 限速持续时间 (秒)
 }
 
 type userSpeedState struct {
