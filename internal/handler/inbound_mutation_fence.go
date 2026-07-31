@@ -802,7 +802,11 @@ func (h *ManageHandler) pendingInboundMutationActualInbound(
 		paths = append(paths, path)
 	}
 	add(pending.ConfigPath)
-	add(h.findXrayConfigPath())
+	currentConfigPath := h.findXrayConfigPath()
+	if h.inboundMutationConfigPathResolver != nil {
+		currentConfigPath = h.inboundMutationConfigPathResolver()
+	}
+	add(currentConfigPath)
 
 	foundConfig := false
 	var actualInbound map[string]interface{}

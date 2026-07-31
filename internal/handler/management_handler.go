@@ -143,16 +143,17 @@ type ManageHandler struct {
 	logPath string
 	// xrayAccessLogPath 是内嵌 xray 的 access log 文件(见 config.XrayAccessLogPathFor)。
 	// 内嵌模式下 service=xray 读它,而不是查 journalctl -u xray(那个 unit 不存在)。
-	xrayAccessLogPath               string
-	inboundMutationFencePath        string
-	inboundMutationFenceLegacyPaths []string
-	inboundMutationFencesLoaded     bool
-	inboundMutationRecoveryReady    bool
-	inboundMutationFences           map[string]inboundMutationFenceState
-	inboundMutationRuntimeConverge  func() error
-	inboundMutationRuntimeApply     func(context.Context, string, map[string]interface{}, bool) error
-	inboundFirewallSync             func(context.Context) error
-	agentUninstallV2Supported       func() bool
+	xrayAccessLogPath                 string
+	inboundMutationFencePath          string
+	inboundMutationFenceLegacyPaths   []string
+	inboundMutationFencesLoaded       bool
+	inboundMutationRecoveryReady      bool
+	inboundMutationFences             map[string]inboundMutationFenceState
+	inboundMutationRuntimeConverge    func() error
+	inboundMutationRuntimeApply       func(context.Context, string, map[string]interface{}, bool) error
+	inboundMutationConfigPathResolver func() string
+	inboundFirewallSync               func(context.Context) error
+	agentUninstallV2Supported         func() bool
 	// agentUpgradeReleaseResolver resolves a signed GitHub release before an
 	// upgrade begins. It is injectable so the refusal path stays testable
 	// without spawning the replacement script.

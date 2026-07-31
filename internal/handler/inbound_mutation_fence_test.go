@@ -351,6 +351,35 @@ func TestPendingInboundMutationAfterConfigWriteCommitsNewOwner(t *testing.T) {
 	}
 }
 
+func TestPendingInboundMutationFailsClosedWhenConfigPathsDisagree(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "inbound-fences.json")
+	handler := newInboundMutationFenceTestHandler(path)
+	seedInboundMutationOwner(t, handler, "same-tag", "generation-old")
+	configPath := inboundMutationFenceTestConfigPath(path)
+	previous := readInboundMutationTestConfig(t, configPath, "same-tag")
+	intended := map[string]interface{}{"tag": "same-tag", "port": float64(2443)}
+
+	handler.inboundsMu.Lock()
+	_, err := handler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID: "generation-new",
+		Inbound:    intended,
+	}, configPath, previous)
+	handler.inboundsMu.Unlock()
+	if err != nil {
+		t.Fatalf("reserve pending mutation: %v", err)
+	}
+
+	alternateConfigPath := filepath.Join(directory, "alternate-xray-config.json")
+	writeInboundMutationTestConfig(t, alternateConfigPath, intended)
+	reloaded := newInboundMutationFenceTestHandler(path)
+	reloaded.inboundMutationConfigPathResolver = func() string { return alternateConfigPath }
+	reloaded.inboundMutationRuntimeConverge = func() error { return nil }
+	if err := reloaded.RecoverInboundMutationFences(); err == nil || !strings.Contains(err.Error(), "config paths disagree") {
+		t.Fatalf("disagreeing durable configs did not fail closed: %v", err)
+	}
+}
+
 func TestPendingInboundMutationBlocksClientAndBatchConfigWrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbound-fences.json")
 	handler := newInboundMutationFenceTestHandler(path)
@@ -915,6 +944,9 @@ func newInboundMutationFenceTestHandler(path string) *ManageHandler {
 	return &ManageHandler{
 		inboundMutationFencePath: path,
 		inboundMutationFences:    make(map[string]inboundMutationFenceState),
+		inboundMutationConfigPathResolver: func() string {
+			return inboundMutationFenceTestConfigPath(path)
+		},
 		inboundMutationRuntimeApply: func(
 			context.Context,
 			string,
