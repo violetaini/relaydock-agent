@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,6 +141,10 @@ type ManageHandler struct {
 	// 2) 主控旧 GET→remove+add 路径下相互覆盖丢 client。
 	// 配置文件只有一份,锁不需要 per-inbound 粒度,直接 handler 全局即可。
 	inboundsMu sync.Mutex
+	// certDeployMu serializes certificate pair replacement and service reloads.
+	// Without it, concurrent renewals targeting the same files could snapshot
+	// and roll back each other's certificate/key pair.
+	certDeployMu sync.Mutex
 	// logPath 是 agent 自身日志文件路径(lumberjack),由 main.go 注入。HandleGetLogs 读它。
 	logPath string
 	// xrayAccessLogPath 是内嵌 xray 的 access log 文件(见 config.XrayAccessLogPathFor)。
@@ -158,6 +164,7 @@ type ManageHandler struct {
 	// upgrade begins. It is injectable so the refusal path stays testable
 	// without spawning the replacement script.
 	agentUpgradeReleaseResolver func(context.Context, string) (string, error)
+	externalXrayLookPath        func(string) (string, error)
 }
 
 // SetLogPath 注入 agent 自身日志文件路径,供 HandleGetLogs 读取。
@@ -177,6 +184,7 @@ func NewManageHandler(configToken, restartMethod, restartCommand string) *Manage
 		inboundFirewallSync:         syncArcwayInboundFirewall,
 		agentUninstallV2Supported:   util.SupportsAgentUninstallV2,
 		agentUpgradeReleaseResolver: defaultAgentUpgradeReleaseResolver,
+		externalXrayLookPath:        exec.LookPath,
 	}
 }
 
@@ -993,6 +1001,10 @@ func (h *ManageHandler) setXrayConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if err := embedded.ValidateConfigProtocols(rawConfig); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// 写盘前用 xray test 验证(默认必测)— 阻止坏配置写入磁盘后引发 xray 启动失败 → 用户被迫 SSH 救援。
 	// 外置 + 系统装了 xray 优先用命令(认 fork 字段);否则用 xray-core 库(基于 LoadJSONConfig)。
@@ -1046,6 +1058,9 @@ func (h *ManageHandler) setXrayConfig(w http.ResponseWriter, r *http.Request) {
 //
 // method 取值 "xray-cli" / "xray-library" — 前端可据此显示验证手段。
 func runXrayTest(ctx context.Context, xrayMode string, rawConfig []byte) (err error, output, method string) {
+	if validationErr := embedded.ValidateConfigProtocols(rawConfig); validationErr != nil {
+		return validationErr, "", "agent-policy"
+	}
 	if xrayMode != "embedded" {
 		if p, lookErr := exec.LookPath("xray"); lookErr == nil {
 			tmpfile, terr := os.CreateTemp("", "xray-test-*.json")
@@ -2014,6 +2029,10 @@ func (h *ManageHandler) saveXrayConfigFile(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "Invalid JSON content")
 			return
 		}
+		if err := embedded.ValidateConfigProtocols([]byte(req.Content)); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	if err := os.WriteFile(filePath, []byte(req.Content), 0644); err != nil {
@@ -2401,7 +2420,7 @@ func mergeInboundClients(dst, src map[string]interface{}) {
 	switch strings.ToLower(proto) {
 	case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
 		arrKey = "clients"
-	case "anytls", "snell", "mieru":
+	case "anytls", "mieru":
 		arrKey = "users"
 	case "socks", "http":
 		arrKey = "accounts"
@@ -2694,6 +2713,12 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 	action := strings.ToLower(strings.TrimSpace(req.Action))
 	if action == "" {
 		action = "add"
+	}
+	if req.Inbound != nil {
+		if protocol, _ := req.Inbound["protocol"].(string); strings.EqualFold(strings.TrimSpace(protocol), "snell") {
+			writeError(w, http.StatusBadRequest, "protocol \"snell\" is disabled")
+			return
+		}
 	}
 
 	// 全局串行化 — 见 inboundsMu 字段注释。所有 inbound CRUD(包括新的 add-client / remove-client)
@@ -3170,7 +3195,7 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 	switch strings.ToLower(protocol) {
 	case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
 		arrKey = "clients"
-	case "anytls", "snell", "mieru":
+	case "anytls", "mieru":
 		arrKey = "users"
 	case "socks", "http":
 		arrKey = "accounts"
@@ -3473,8 +3498,6 @@ func matchClientCredential(a, b map[string]interface{}, protocol string) bool {
 		primaryKey = "id"
 	case "trojan", "shadowsocks", "anytls":
 		primaryKey = "password"
-	case "snell":
-		primaryKey = "psk"
 	case "mieru":
 		primaryKey = "username"
 	case "hysteria":
@@ -4150,7 +4173,7 @@ func applyAddClientToConfig(config map[string]interface{}, tag string, client ma
 		switch strings.ToLower(protocol) {
 		case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
 			arrKey = "clients"
-		case "anytls", "snell", "mieru":
+		case "anytls", "mieru":
 			arrKey = "users"
 		case "socks", "http":
 			arrKey = "accounts"
@@ -5267,26 +5290,64 @@ func (h *ManageHandler) HandleCertDeploy(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "cert_pem, key_pem, cert_path, key_path are required")
 		return
 	}
+	h.certDeployMu.Lock()
+	defer h.certDeployMu.Unlock()
+
 	xrayReload := req.Reload == "xray" || req.Reload == "both"
+	nginxReload := req.Reload == "nginx" || req.Reload == "both"
 	if xrayReload {
 		h.inboundsMu.Lock()
 		defer h.inboundsMu.Unlock()
 	}
-	fileReload := req.Reload
-	if req.Reload == "xray" {
-		fileReload = "none"
-	} else if req.Reload == "both" {
-		fileReload = "nginx"
-	}
 
-	if err := deployCertFiles(req.CertPEM, req.KeyPEM, req.CertPath, req.KeyPath, fileReload); err != nil {
+	deployment, err := deployCertFiles(req.CertPEM, req.KeyPEM, req.CertPath, req.KeyPath)
+	if err != nil {
 		log.Printf("[CertDeploy] Failed to deploy cert for %s: %v", req.Domain, err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("deploy failed: %v", err))
 		return
 	}
+	if nginxReload {
+		if err := reloadNginx(); err != nil {
+			activationErr := rollbackCertDeploymentAfterReloadFailure(
+				deployment,
+				fmt.Errorf("nginx reload failed: %w", err),
+				func() error {
+					if recoveryErr := reloadNginx(); recoveryErr != nil {
+						return fmt.Errorf("reload nginx with restored certificate: %w", recoveryErr)
+					}
+					return nil
+				},
+			)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("certificate activation failed: %v", activationErr))
+			return
+		}
+	}
 	if xrayReload {
 		if err := h.restartXrayLocked(); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("deploy succeeded but xray reload failed: %v", err))
+			recovery := make([]func() error, 0, 2)
+			if nginxReload {
+				recovery = append(recovery, func() error {
+					if recoveryErr := reloadNginx(); recoveryErr != nil {
+						return fmt.Errorf("reload nginx with restored certificate: %w", recoveryErr)
+					}
+					return nil
+				})
+			}
+			recovery = append(recovery, func() error {
+				if recoveryErr := h.restartXrayLocked(); recoveryErr != nil {
+					return fmt.Errorf("restart xray with restored certificate: %w", recoveryErr)
+				}
+				if recoveryErr := h.completeInboundMutationRecoveryAfterRuntimeStartLocked(); recoveryErr != nil {
+					return fmt.Errorf("complete inbound recovery after certificate rollback: %w", recoveryErr)
+				}
+				return nil
+			})
+			activationErr := rollbackCertDeploymentAfterReloadFailure(
+				deployment,
+				fmt.Errorf("xray reload failed: %w", err),
+				recovery...,
+			)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("certificate activation failed: %v", activationErr))
 			return
 		}
 		if err := h.completeInboundMutationRecoveryAfterRuntimeStartLocked(); err != nil {
@@ -5300,38 +5361,6 @@ func (h *ManageHandler) HandleCertDeploy(w http.ResponseWriter, r *http.Request)
 		"success": true,
 		"message": fmt.Sprintf("certificate for %s deployed", req.Domain),
 	})
-}
-
-func deployCertFiles(certPEM, keyPEM, certPath, keyPath, reloadTarget string) error {
-	// 证书目标路径管理员可自定义,无法白名单收死;主防御是内容必须为真实 PEM 证书/私钥
-	// (写进 cron/脚本/authorized_keys 也不会被解析执行),路径黑名单兜底敏感目录。
-	if err := util.ValidateCertKeyPEM(certPEM, keyPEM); err != nil {
-		return err
-	}
-	if err := util.CertPathSafe(certPath); err != nil {
-		return fmt.Errorf("cert path: %w", err)
-	}
-	if err := util.CertPathSafe(keyPath); err != nil {
-		return fmt.Errorf("key path: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(certPath), 0755); err != nil {
-		return fmt.Errorf("create cert dir: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0755); err != nil {
-		return fmt.Errorf("create key dir: %w", err)
-	}
-	if err := os.WriteFile(certPath, []byte(certPEM), 0644); err != nil {
-		return fmt.Errorf("write cert: %w", err)
-	}
-	if err := os.WriteFile(keyPath, []byte(keyPEM), 0600); err != nil {
-		return fmt.Errorf("write key: %w", err)
-	}
-
-	switch reloadTarget {
-	case "nginx":
-		return reloadNginx()
-	}
-	return nil
 }
 
 func deployNginxSSLConfig(domain string) {
@@ -6438,6 +6467,12 @@ func (h *ManageHandler) HandleSwitchXrayMode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "Config path not set")
 		return
 	}
+	if req.XrayMode == "external" {
+		if err := h.preflightExternalXray(); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
 	if err := h.ensureInboundMutationFencesLocked(); err != nil {
@@ -6472,14 +6507,6 @@ func (h *ManageHandler) HandleSwitchXrayMode(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	log.Printf("[Manage] Config updated: xray_mode=%s", req.XrayMode)
-
-	// 切到 external：确保外部 xray 已安装并启用
-	if req.XrayMode == "external" {
-		if err := h.ensureExternalXray(); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Ensure external xray: %v", err))
-			return
-		}
-	}
 
 	// 先回复成功，再延迟自重启
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -6603,13 +6630,12 @@ func (h *ManageHandler) HandleUpdateMasterURL(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "master_url required")
 		return
 	}
-	req.MasterURL = strings.TrimSpace(req.MasterURL)
-	// 必须是合法 http(s) URL 且无控制字符 —— 否则换行会注入任意 YAML 行到 config.yaml
-	// (如注入 master_public_key 指向攻击者公钥,造成 master 私钥轮换后也无法驱逐)。
-	if !util.IsHTTPURL(req.MasterURL) {
-		writeError(w, http.StatusBadRequest, "master_url 必须是 http(s):// 合法地址且不含控制字符")
+	normalizedMasterURL, err := normalizeMasterURL(req.MasterURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid master_url: "+err.Error())
 		return
 	}
+	req.MasterURL = normalizedMasterURL
 
 	if h.configPath == "" {
 		writeError(w, http.StatusInternalServerError, "Config path not set")
@@ -6627,6 +6653,17 @@ func (h *ManageHandler) HandleUpdateMasterURL(w http.ResponseWriter, r *http.Req
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "master_url:") {
+			current := strings.TrimSpace(strings.TrimPrefix(trimmed, "master_url:"))
+			current = strings.Trim(current, `"'`)
+			if sameMasterURL(current, req.MasterURL) {
+				h.SetMasterURL(req.MasterURL)
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"success":   true,
+					"unchanged": true,
+					"message":   "master_url already up to date",
+				})
+				return
+			}
 			lines[i] = "master_url: " + req.MasterURL
 			found = true
 			break
@@ -6659,27 +6696,61 @@ func (h *ManageHandler) HandleUpdateMasterURL(w http.ResponseWriter, r *http.Req
 	}()
 }
 
-// ensureExternalXray 确保外部 Xray 已安装、启用并启动。
-func (h *ManageHandler) ensureExternalXray() error {
-	// 检查 xray 二进制是否存在
-	if _, err := exec.LookPath("xray"); err != nil {
-		log.Printf("[Manage] External xray not found, installing...")
-		cmd := exec.Command("bash", "-c",
-			`bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`)
-		cmd.Env = os.Environ()
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("install xray: %v (%s)", err, string(output))
-		}
-		log.Printf("[Manage] External xray installed")
+func normalizeMasterURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || !util.NoControlChars(value) {
+		return "", fmt.Errorf("must be a non-empty URL without control characters")
 	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("parse URL: %w", err)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("scheme must be http or https")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("credentials are not allowed")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "" {
+		return "", fmt.Errorf("host is required")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("query and fragment are not allowed")
+	}
+	port := parsed.Port()
+	if (parsed.Scheme == "http" && port == "80") || (parsed.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if net.ParseIP(hostname) != nil && strings.Contains(hostname, ":") {
+		hostname = "[" + hostname + "]"
+	}
+	parsed.Host = hostname
+	if port != "" {
+		parsed.Host += ":" + port
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	return parsed.String(), nil
+}
 
-	// 启用并启动外部 xray 服务
-	exec.Command("systemctl", "enable", "xray").Run()
-	if err := exec.Command("systemctl", "start", "xray").Run(); err != nil {
-		return fmt.Errorf("start xray service: %v", err)
+func sameMasterURL(left, right string) bool {
+	normalizedLeft, leftErr := normalizeMasterURL(left)
+	normalizedRight, rightErr := normalizeMasterURL(right)
+	return leftErr == nil && rightErr == nil && normalizedLeft == normalizedRight
+}
+
+// preflightExternalXray only verifies that the user-managed binary exists.
+// Installation is intentionally restricted to the explicit quick-install API.
+func (h *ManageHandler) preflightExternalXray() error {
+	lookPath := h.externalXrayLookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
 	}
-	log.Printf("[Manage] External xray service enabled and started")
+	if _, err := lookPath("xray"); err != nil {
+		return fmt.Errorf("external Xray is not installed; install it explicitly before switching modes")
+	}
 	return nil
 }
 

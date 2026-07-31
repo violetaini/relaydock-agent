@@ -38,8 +38,11 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      - name: Go mod download
-        run: go mod download
+      - name: Verify dependencies and record official Xray version
+        run: |
+          go mod download
+          go mod verify
+          go list -m -f 'Official Xray module: {{.Path}} {{.Version}}' github.com/xtls/xray-core
 
       - name: Build
         env:

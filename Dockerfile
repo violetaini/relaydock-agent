@@ -18,7 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # relaydock-agent 源码本体
 WORKDIR /build/relaydock-agent
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download \
+    && go mod verify \
+    && go list -m -f 'Official Xray module: {{.Path}} {{.Version}}' github.com/xtls/xray-core
 COPY . .
 
 # 编译 — CGO 关 (纯静态;主控也是这个配置),embedded xray-core 是 Go 库静态链接进来

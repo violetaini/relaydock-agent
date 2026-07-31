@@ -3,7 +3,9 @@ package embedded
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 
 	officialstats "github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
@@ -17,6 +19,41 @@ import (
 	mydispatcher "github.com/violetaini/relaydock-agent/internal/dispatcher"
 )
 
+// ValidateConfigProtocols enforces protocols intentionally disabled by the
+// Agent product surface before either the embedded parser or an external Xray
+// binary sees the configuration.
+func ValidateConfigProtocols(jsonData []byte) error {
+	var value any
+	if err := json.Unmarshal(jsonData, &value); err != nil {
+		return err
+	}
+	return rejectDisabledProtocol(value, "config")
+}
+
+func rejectDisabledProtocol(value any, path string) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			childPath := path + "." + key
+			if key == "protocol" {
+				if protocol, ok := child.(string); ok && strings.EqualFold(strings.TrimSpace(protocol), "snell") {
+					return fmt.Errorf("%s: protocol %q is disabled", childPath, protocol)
+				}
+			}
+			if err := rejectDisabledProtocol(child, childPath); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for index, child := range typed {
+			if err := rejectDisabledProtocol(child, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // TestConfigJSON 用 xray-core 库语义验证一份 JSON 配置:
 //   - 解析失败 → 返回 error,内容包含 xray-core 抛出的字段路径/类型错误
 //   - 解析成功 → 返回 nil
@@ -24,6 +61,9 @@ import (
 // 不会绑定端口、不会和正在运行的内嵌 xray instance 冲突 — 只走 conf parsing。
 // 实现等价 xray 二进制的 -test flag 内部所做的事(LoadConfig,不 Build instance)。
 func TestConfigJSON(jsonData []byte) error {
+	if err := ValidateConfigProtocols(jsonData); err != nil {
+		return err
+	}
 	_, err := confserial.LoadJSONConfig(bytes.NewReader(jsonData))
 	return err
 }
@@ -65,6 +105,9 @@ func buildCoreConfig(configPath string) (*core.Config, error) {
 		return nil, err
 	}
 	data = injectAccessLog(data)
+	if err := ValidateConfigProtocols(data); err != nil {
+		return nil, err
+	}
 
 	pbConfig, err := confserial.LoadJSONConfig(bytes.NewReader(data))
 	if err != nil {

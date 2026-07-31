@@ -54,7 +54,11 @@ sign-local.sh
 !internal/handler/xray_install_test.go
 !internal/handler/nginx_mode_switch_test.go
 !internal/handler/agent_upgrade_guard_test.go
+!internal/handler/master_url_test.go
+!internal/handler/xray_mode_switch_test.go
+!internal/handler/cert_deploy_atomic_test.go
 !internal/handler/inbound_mutation_fence_test.go
 !internal/handler/user_agent_compat_test.go
 !internal/version/compare_test.go
 !internal/xrpc/services/handler/outbound_test.go
+!internal/embedded/config_policy_test.go
