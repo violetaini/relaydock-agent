@@ -40,7 +40,85 @@ const (
 	agentLatestReleaseAPIURL     = "https://api.github.com/repos/violetaini/relaydock-agent/releases/latest"
 	agentUpgradeMetadataTimeout  = 15 * time.Second
 	agentUpgradeMetadataMaxBytes = 1 << 20
+	maxXrayInstallRequestBytes   = 4096
+	xrayInstallScript            = `set -euo pipefail
+installer_path="$(mktemp)"
+cleanup() {
+    rm -f "$installer_path"
+}
+trap cleanup EXIT
+curl -fsSL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o "$installer_path"
+if [ -n "${XRAY_TARGET_VERSION:-}" ]; then
+    bash "$installer_path" install --version "$XRAY_TARGET_VERSION" --force
+else
+    bash "$installer_path" install
+fi`
 )
+
+var xrayReleaseVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
+
+type xrayInstallRequest struct {
+	Version string `json:"version"`
+}
+
+func normalizeXrayReleaseVersion(raw string) (string, error) {
+	version := strings.TrimSpace(raw)
+	if version == "" {
+		return "", nil
+	}
+	if !xrayReleaseVersionPattern.MatchString(version) {
+		return "", fmt.Errorf("invalid Xray version %q: expected vN.N.N", raw)
+	}
+	if version[0] != 'v' {
+		version = "v" + version
+	}
+	return version, nil
+}
+
+func decodeXrayInstallRequest(body io.Reader) (string, error) {
+	if body == nil {
+		return "", nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxXrayInstallRequestBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read request body: %w", err)
+	}
+	if len(data) > maxXrayInstallRequestBytes {
+		return "", fmt.Errorf("request body exceeds %d bytes", maxXrayInstallRequestBytes)
+	}
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return "", nil
+	}
+	if bytes.Equal(data, []byte("null")) {
+		return "", fmt.Errorf("request body must be a JSON object")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var request xrayInstallRequest
+	if err := decoder.Decode(&request); err != nil {
+		return "", fmt.Errorf("invalid request body: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return "", fmt.Errorf("invalid request body: trailing JSON content")
+	}
+	return normalizeXrayReleaseVersion(request.Version)
+}
+
+func newXrayInstallCommand(ctx context.Context, version string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bash", "-c", xrayInstallScript)
+	environment := os.Environ()
+	filteredEnvironment := make([]string, 0, len(environment)+1)
+	for _, value := range environment {
+		if strings.HasPrefix(value, "XRAY_TARGET_VERSION=") {
+			continue
+		}
+		filteredEnvironment = append(filteredEnvironment, value)
+	}
+	cmd.Env = append(filteredEnvironment, "XRAY_TARGET_VERSION="+version)
+	return cmd
+}
 
 // ManageHandler 处理子端管理接口请求。
 type ManageHandler struct {
@@ -698,6 +776,11 @@ func (h *ManageHandler) HandleXrayInstall(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
+	targetVersion, err := decodeXrayInstallRequest(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Docker 镜像里强制 embedded 模式,xray-core 作为 Go 库编进 binary,不需要外部 xray;
 	// install-release.sh 内部走 systemctl,容器里跑不通也没意义。
@@ -715,16 +798,19 @@ func (h *ManageHandler) HandleXrayInstall(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	log.Printf("[Manage] Installing Xray...")
+	if targetVersion == "" {
+		log.Printf("[Manage] Installing latest Xray...")
+	} else {
+		log.Printf("[Manage] Installing Xray %s...", targetVersion)
+	}
 
-	cmd := exec.Command("bash", "-c", "bash -c \"$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install")
-	cmd.Env = os.Environ()
+	cmd := newXrayInstallCommand(r.Context(), targetVersion)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		log.Printf("[Manage] Xray installation failed: %v, stderr: %s", err, stderr.String())
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Installation failed: %v", err))
@@ -1691,7 +1777,8 @@ func (h *ManageHandler) HandleSystemInfo(w http.ResponseWriter, r *http.Request)
 		"success":       true,
 		"agent_version": version.Version, // 主控用这个对比 GitHub latest tag 决定是否提示升级
 		"capabilities": map[string]bool{
-			constants.CapabilityAgentUninstallV2: h.supportsAgentUninstallV2(),
+			constants.CapabilityAgentUninstallV2:    h.supportsAgentUninstallV2(),
+			constants.CapabilityXrayVersionSelectV1: true,
 		},
 	}
 
@@ -5783,7 +5870,7 @@ func (h *ManageHandler) deployDefaultXrayConfigLocked() {
 
 // ================== SSE 流式安装/卸载 ==================
 
-func sseStreamCmd(w http.ResponseWriter, r *http.Request, cmd *exec.Cmd, completeMsg string) {
+func sseStreamCmd(w http.ResponseWriter, r *http.Request, cmd *exec.Cmd, completeMsg string) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -5791,23 +5878,23 @@ func sseStreamCmd(w http.ResponseWriter, r *http.Request, cmd *exec.Cmd, complet
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("streaming not supported")
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		sseEvent(w, flusher, map[string]string{"type": "error", "message": err.Error()})
-		return
+		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		sseEvent(w, flusher, map[string]string{"type": "error", "message": err.Error()})
-		return
+		return err
 	}
 
 	if err := cmd.Start(); err != nil {
 		sseEvent(w, flusher, map[string]string{"type": "error", "message": err.Error()})
-		return
+		return err
 	}
 
 	var mu sync.Mutex
@@ -5841,16 +5928,20 @@ func sseStreamCmd(w http.ResponseWriter, r *http.Request, cmd *exec.Cmd, complet
 		wg.Wait()
 		if err != nil {
 			sseEvent(w, flusher, map[string]string{"type": "error", "message": err.Error()})
+			return err
 		} else {
 			sseEvent(w, flusher, map[string]interface{}{"type": "complete", "success": true, "message": completeMsg})
+			return nil
 		}
 	case <-r.Context().Done():
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		// 主动关 pipe 强制 scanner.Scan 返回 — 否则子进程若 fork 了继承 pipe 写端的后台进程,
 		// 两个 scanStream goroutine 会永久阻塞在 Read 上,泄漏 goroutine + fd。
-		stdout.Close()
-		stderr.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		wg.Wait()
 		sseEvent(w, flusher, map[string]string{"type": "error", "message": "request cancelled"})
+		return r.Context().Err()
 	}
 }
 
@@ -5869,17 +5960,27 @@ func (h *ManageHandler) HandleXrayInstallStream(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
+	targetVersion, err := decodeXrayInstallRequest(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
 	if err := h.ensureInboundMutationFencesLocked(); err != nil {
 		writeError(w, http.StatusConflict, "Xray installation blocked: "+err.Error())
 		return
 	}
-	log.Printf("[Manage] Starting Xray install (stream)...")
-	cmd := exec.CommandContext(r.Context(), "bash", "-c",
-		`bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`)
-	cmd.Env = os.Environ()
-	sseStreamCmd(w, r, cmd, "Xray installed successfully")
+	if targetVersion == "" {
+		log.Printf("[Manage] Starting latest Xray install (stream)...")
+	} else {
+		log.Printf("[Manage] Starting Xray %s install (stream)...", targetVersion)
+	}
+	cmd := newXrayInstallCommand(r.Context(), targetVersion)
+	if err := sseStreamCmd(w, r, cmd, "Xray installed successfully"); err != nil {
+		log.Printf("[Manage] Xray stream installation failed: %v", err)
+		return
+	}
 
 	// 安装完成后下发默认配置
 	h.deployDefaultXrayConfigLocked()

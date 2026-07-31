@@ -701,9 +701,10 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 
 func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported bool) map[string]bool {
 	return map[string]bool{
-		"rpc":                                rpcAvailable,
-		"stream":                             rpcAvailable,
-		constants.CapabilityAgentUninstallV2: agentUninstallV2Supported,
+		"rpc":                                   rpcAvailable,
+		"stream":                                rpcAvailable,
+		constants.CapabilityAgentUninstallV2:    agentUninstallV2Supported,
+		constants.CapabilityXrayVersionSelectV1: true,
 	}
 }
 

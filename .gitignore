@@ -45,11 +45,13 @@ sign-local.sh.example
 sign-local.sh
 *_test.go
 !internal/agent/nginx_mode_test.go
+!internal/agent/xray_version_capability_test.go
 !internal/agent/cert_reload_test.go
 !internal/agent/user_agent_compat_test.go
 !internal/constants/user_agent_test.go
 !internal/handler/nginx_reuse_test.go
 !internal/handler/nginx_reuse_integration_test.go
+!internal/handler/xray_install_test.go
 !internal/handler/nginx_mode_switch_test.go
 !internal/handler/agent_upgrade_guard_test.go
 !internal/handler/inbound_mutation_fence_test.go
