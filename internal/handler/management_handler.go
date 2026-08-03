@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,21 @@ type ManageHandler struct {
 	// 2) 主控旧 GET→remove+add 路径下相互覆盖丢 client。
 	// 配置文件只有一份,锁不需要 per-inbound 粒度,直接 handler 全局即可。
 	inboundsMu sync.Mutex
+	// xrayAuthorized controls only the RelayDock-owned inbounds. It must never
+	// be implemented by stopping a whole external Xray process: that process may
+	// also serve user-managed inbounds which RelayDock does not own.
+	xrayAuthorized         bool
+	xrayAuthorizationKnown bool
+	// A denial observed in this Agent process may have been handled by an older
+	// release that stopped external Xray. Keep retrying a start on the later
+	// authorization grant until the service is actually observed running.
+	xrayAuthorizationStartPending bool
+	// The following hooks keep the authorization transition testable without a
+	// live Xray gRPC endpoint. Production leaves them nil.
+	xrayAuthorizationInboundResolver func() ([]managedInboundDefinition, error)
+	xrayAuthorizationRuntimeApply    func(context.Context, bool, []managedInboundDefinition) error
+	xrayStatusResolver               func() *ServiceStatus
+	externalXrayStarter              func() error
 	// certDeployMu serializes certificate pair replacement and service reloads.
 	// Without it, concurrent renewals targeting the same files could snapshot
 	// and roll back each other's certificate/key pair.
@@ -180,6 +196,8 @@ func NewManageHandler(configToken, restartMethod, restartCommand string) *Manage
 		nginxMode:                   constants.NginxModeManaged,
 		restartMethod:               restartMethod,
 		restartCommand:              restartCommand,
+		xrayAuthorized:              true,
+		xrayAuthorizationKnown:      true,
 		inboundMutationFences:       make(map[string]inboundMutationFenceState),
 		inboundFirewallSync:         syncArcwayInboundFirewall,
 		agentUninstallV2Supported:   util.SupportsAgentUninstallV2,
@@ -274,24 +292,43 @@ func (h *ManageHandler) RestartXray() error {
 	if err := h.restartXrayLocked(); err != nil {
 		return err
 	}
+	if !h.xrayAuthorizedLocked() {
+		return nil
+	}
 	return h.completeInboundMutationRecoveryAfterRuntimeStartLocked()
 }
 
 // restartXrayLocked restarts Xray while the caller holds inboundsMu.
 func (h *ManageHandler) restartXrayLocked() error {
+	var err error
 	if h.xrayMode == "embedded" {
 		h.embeddedMu.Lock()
-		defer h.embeddedMu.Unlock()
 		if h.embeddedXray != nil {
-			return h.restartEmbeddedXray()
+			err = h.restartEmbeddedXray()
+		} else {
+			err = h.lazyStartEmbeddedXray()
 		}
-		return h.lazyStartEmbeddedXray()
+		h.embeddedMu.Unlock()
+	} else {
+		err = xrayctl.RestartXray(h.restartMethod, h.restartCommand)
 	}
-	return xrayctl.RestartXray(h.restartMethod, h.restartCommand)
+	if err != nil {
+		return err
+	}
+	// A manual/config-triggered restart must not accidentally resurrect a
+	// RelayDock inbound while the server is out of license quota. The runtime
+	// reconciliation removes only fenced RelayDock tags; external inbounds stay
+	// untouched.
+	if !h.xrayAuthorizedLocked() {
+		if authErr := h.reapplyUnauthorizedInboundRemovalAfterRuntimeStartLocked(); authErr != nil {
+			log.Printf("[Manage] Xray restarted while unauthorized; managed inbound disable deferred: %v", authErr)
+		}
+	}
+	return nil
 }
 
 // StopXray 停止 xray:tunnel 模式先恢复 nginx 443 fallback 再停,让 nginx 接管 443。
-// 与 HandleServiceControl 的 stop 分支同源逻辑,供许可证配额授权回调(超额停机)复用。
+// 与 HandleServiceControl 的 stop 分支同源逻辑。许可证配额切换不调用此方法。
 func (h *ManageHandler) StopXray() {
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
@@ -311,12 +348,15 @@ func (h *ManageHandler) stopXrayLocked() {
 }
 
 // StartXray 启动 xray:tunnel 模式先移除 nginx 443 fallback 释放端口再启,失败则回滚 fallback。
-// 与 HandleServiceControl 的 start 分支同源逻辑,供许可证配额授权回调(拿到名额启机)复用。
+// 与 HandleServiceControl 的 start 分支同源逻辑。许可证配额切换不调用此方法。
 func (h *ManageHandler) StartXray() error {
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
 	if err := h.startXrayLocked(); err != nil {
 		return err
+	}
+	if !h.xrayAuthorizedLocked() {
+		return nil
 	}
 	return h.completeInboundMutationRecoveryAfterRuntimeStartLocked()
 }
@@ -335,6 +375,341 @@ func (h *ManageHandler) startXrayLocked() error {
 		return err
 	}
 	return nil
+}
+
+// managedInboundDefinition is a RelayDock-owned tag selected by its
+// mutation-fence owner, with an optional durable inbound definition. It
+// deliberately contains no unowned Xray tags. This is the ownership boundary
+// used for license suspension so that a user's external Xray configuration
+// keeps serving while RelayDock resources pause.
+type managedInboundDefinition struct {
+	tag     string
+	inbound map[string]interface{}
+}
+
+// ApplyXrayAuthorization applies a control-plane license decision without
+// stopping or restarting a running Xray process. Unauthorized servers lose
+// only their RelayDock-owned inbounds through HandlerService; authorized
+// servers add those inbounds back through the same runtime API.
+//
+// The persisted config remains intact. That preserves user configuration and
+// lets an independently restarted Xray be reconciled without a destructive
+// config rewrite. Repeated config updates are intentionally idempotent and
+// retry a transient unavailable Xray API.
+func (h *ManageHandler) ApplyXrayAuthorization(authorized bool) error {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+
+	wasAuthorized := h.xrayAuthorizedLocked()
+	h.xrayAuthorized = authorized
+	h.xrayAuthorizationKnown = true
+	if !authorized || !wasAuthorized {
+		h.xrayAuthorizationStartPending = true
+	}
+
+	definitions, err := h.managedInboundDefinitionsLocked()
+	if err != nil {
+		return err
+	}
+
+	if authorized {
+		// Older Agents stopped the whole external xray.service on quota denial.
+		// Recover that historical state with a start only when no Xray process is
+		// running; never turn an authorization transition into a restart. Do not
+		// start an intentionally stopped service during a normal Agent boot.
+		if !wasAuthorized || h.xrayAuthorizationStartPending {
+			if err := h.startStoppedXrayForAuthorizationLocked(); err != nil {
+				return err
+			}
+			if status := h.currentXrayStatusLocked(); status != nil && status.Running {
+				h.xrayAuthorizationStartPending = false
+			}
+		}
+		if hasPendingInboundMutation(h.inboundMutationFences) {
+			// The no-restart recovery path converges a crash-interrupted inbound
+			// mutation through HandlerService. Do this only after authorization so
+			// a pending durable inbound cannot be resurrected while suspended.
+			if err := h.completeInboundMutationRecoveryAfterRuntimeStartLocked(); err != nil {
+				return err
+			}
+			definitions, err = h.managedInboundDefinitionsLocked()
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return h.applyManagedInboundAuthorizationLocked(authorized, definitions)
+}
+
+func (h *ManageHandler) xrayAuthorizedLocked() bool {
+	// Test/legacy handlers constructed before this field existed behave like the
+	// historic default: authorized until the control plane explicitly decides.
+	return !h.xrayAuthorizationKnown || h.xrayAuthorized
+}
+
+func (h *ManageHandler) managedInboundDefinitionsLocked() ([]managedInboundDefinition, error) {
+	if h.xrayAuthorizationInboundResolver != nil {
+		return h.xrayAuthorizationInboundResolver()
+	}
+	if err := h.loadInboundMutationFencesLocked(); err != nil {
+		return nil, err
+	}
+	return managedInboundDefinitionsFromInventory(h.inboundMutationFences, h.getInboundsFromConfig()), nil
+}
+
+func managedInboundDefinitionsFromInventory(
+	fences map[string]inboundMutationFenceState,
+	inbounds []map[string]interface{},
+) []managedInboundDefinition {
+	owned := make(map[string]struct{})
+	for tag, state := range fences {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || tag == "api" {
+			continue
+		}
+		// A pending add has not committed an owner yet, but it must still stay
+		// disabled until the server is authorized and recovery can resolve it.
+		if strings.TrimSpace(state.Owner) != "" || state.Pending != nil {
+			owned[tag] = struct{}{}
+		}
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+
+	byTag := make(map[string]map[string]interface{}, len(owned))
+	for _, inbound := range inbounds {
+		tag, _ := inbound["tag"].(string)
+		tag = strings.TrimSpace(tag)
+		if _, ok := owned[tag]; !ok {
+			continue
+		}
+		// The first source wins. RelayDock mutations persist into the primary
+		// config; an external confdir duplicate must never cause us to overwrite
+		// another component merely to satisfy license reconciliation.
+		if _, exists := byTag[tag]; !exists {
+			byTag[tag] = inbound
+		}
+	}
+
+	// Keep every fenced tag, even when its durable definition has since been
+	// removed. An authorization denial must still remove a stale runtime
+	// listener. Re-authorization only adds entries whose durable config is
+	// present (nil inbound below means remove-only).
+	tags := make([]string, 0, len(owned))
+	for tag := range owned {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	definitions := make([]managedInboundDefinition, 0, len(tags))
+	for _, tag := range tags {
+		definitions = append(definitions, managedInboundDefinition{tag: tag, inbound: byTag[tag]})
+	}
+	return definitions
+}
+
+func (h *ManageHandler) isManagedInboundTagLocked(tag string) bool {
+	tag = strings.TrimSpace(tag)
+	if tag == "" || tag == "api" {
+		return false
+	}
+	state, ok := h.inboundMutationFences[tag]
+	return ok && (strings.TrimSpace(state.Owner) != "" || state.Pending != nil)
+}
+
+func (h *ManageHandler) currentXrayStatusLocked() *ServiceStatus {
+	if h.xrayStatusResolver != nil {
+		return h.xrayStatusResolver()
+	}
+	return h.getXrayStatus()
+}
+
+func (h *ManageHandler) startStoppedXrayForAuthorizationLocked() error {
+	status := h.currentXrayStatusLocked()
+	if status == nil || status.Running || !status.Installed {
+		return nil
+	}
+
+	if h.xrayMode == "embedded" {
+		h.embeddedMu.Lock()
+		err := h.lazyStartEmbeddedXray()
+		h.embeddedMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("start previously stopped embedded Xray: %w", err)
+		}
+		return nil
+	}
+
+	starter := h.externalXrayStarter
+	if starter == nil {
+		starter = xrayctl.StartXray
+	}
+	// Older quota denial called StopXray, which installs the managed Nginx
+	// fallback on 443 before stopping Xray. Release that Arcway-owned fallback
+	// before the start or a tunnel inbound cannot bind its port. Reuse-existing
+	// Nginx never receives this mutation, matching the original stop path.
+	releasedFallback := false
+	if h.configNeedsPort443() && !h.reusesExistingNginx() {
+		h.removeFallback443()
+		h.reloadNginx()
+		time.Sleep(300 * time.Millisecond)
+		releasedFallback = true
+	}
+	if err := starter(); err != nil {
+		if releasedFallback {
+			h.deployFallback443()
+			h.reloadNginx()
+		}
+		return fmt.Errorf("start previously stopped external Xray: %w", err)
+	}
+	return nil
+}
+
+func (h *ManageHandler) applyXrayAuthorizationLocked(authorized bool) error {
+	definitions, err := h.managedInboundDefinitionsLocked()
+	if err != nil {
+		return err
+	}
+	return h.applyManagedInboundAuthorizationLocked(authorized, definitions)
+}
+
+// reapplyUnauthorizedInboundRemovalAfterRuntimeStartLocked closes the small
+// window after Xray loads its durable config. It is called after restart and
+// embedded lazy-start paths so a suspended managed inbound never remains
+// active merely because Xray itself started successfully.
+func (h *ManageHandler) reapplyUnauthorizedInboundRemovalAfterRuntimeStartLocked() error {
+	if h.xrayAuthorizedLocked() {
+		return nil
+	}
+	return h.applyXrayAuthorizationLocked(false)
+}
+
+func (h *ManageHandler) applyManagedInboundAuthorizationLocked(authorized bool, definitions []managedInboundDefinition) error {
+	if len(definitions) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if h.xrayAuthorizationRuntimeApply != nil {
+		return h.xrayAuthorizationRuntimeApply(ctx, authorized, definitions)
+	}
+
+	if h.xrayMode == "embedded" {
+		if h.embeddedXray == nil || !h.embeddedXray.IsRunning() {
+			return fmt.Errorf("embedded Xray is not running")
+		}
+		active := make(map[string]struct{})
+		for _, tag := range h.embeddedXray.ListInbounds() {
+			active[tag] = struct{}{}
+		}
+		return h.applyManagedEmbeddedInboundAuthorization(authorized, definitions, active)
+	}
+
+	apiPort := h.findXrayAPIPort()
+	if apiPort == 0 {
+		return fmt.Errorf("xray API port not found")
+	}
+	clients, err := xrpc.New(ctx, constants.LocalhostIP, uint16(apiPort))
+	if err != nil {
+		return fmt.Errorf("connect xray: %w", err)
+	}
+	defer clients.Connection.Close()
+	response, err := clients.Handler.ListInbounds(ctx, &command.ListInboundsRequest{IsOnlyTags: true})
+	if err != nil {
+		return fmt.Errorf("list xray inbounds: %w", err)
+	}
+	active := make(map[string]struct{}, len(response.GetInbounds()))
+	for _, inbound := range response.GetInbounds() {
+		active[inbound.GetTag()] = struct{}{}
+	}
+	return h.applyManagedExternalInboundAuthorization(ctx, clients.Handler, authorized, definitions, active)
+}
+
+func (h *ManageHandler) applyManagedEmbeddedInboundAuthorization(
+	authorized bool,
+	definitions []managedInboundDefinition,
+	active map[string]struct{},
+) error {
+	var errs []error
+	for _, definition := range definitions {
+		_, running := active[definition.tag]
+		if !authorized {
+			if !running {
+				continue
+			}
+			if err := h.embeddedXray.RemoveInbound(definition.tag); err != nil && !isMissingInboundError(err) {
+				errs = append(errs, fmt.Errorf("disable managed inbound %s: %w", definition.tag, err))
+			}
+			continue
+		}
+		if running {
+			continue
+		}
+		if definition.inbound == nil {
+			continue
+		}
+		rawConfig, err := buildRuntimeInboundConfig(definition.inbound)
+		if err == nil {
+			err = h.embeddedXray.AddInbound(rawConfig)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("enable managed inbound %s: %w", definition.tag, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (h *ManageHandler) applyManagedExternalInboundAuthorization(
+	ctx context.Context,
+	handlerClient command.HandlerServiceClient,
+	authorized bool,
+	definitions []managedInboundDefinition,
+	active map[string]struct{},
+) error {
+	var errs []error
+	for _, definition := range definitions {
+		_, running := active[definition.tag]
+		if !authorized {
+			if !running {
+				continue
+			}
+			if err := h.removeInbound(ctx, handlerClient, definition.tag); err != nil && !isMissingInboundError(err) {
+				errs = append(errs, fmt.Errorf("disable managed inbound %s: %w", definition.tag, err))
+			}
+			continue
+		}
+		if running {
+			continue
+		}
+		if definition.inbound == nil {
+			continue
+		}
+		rawConfig, err := buildRuntimeInboundConfig(definition.inbound)
+		if err == nil {
+			_, err = handlerClient.AddInbound(ctx, &command.AddInboundRequest{Inbound: rawConfig})
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("enable managed inbound %s: %w", definition.tag, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func buildRuntimeInboundConfig(inbound map[string]interface{}) (*core.InboundHandlerConfig, error) {
+	inboundJSON, err := json.Marshal(inbound)
+	if err != nil {
+		return nil, fmt.Errorf("marshal inbound: %w", err)
+	}
+	inboundConfig := &conf.InboundDetourConfig{}
+	if err := json.Unmarshal(inboundJSON, inboundConfig); err != nil {
+		return nil, fmt.Errorf("unmarshal inbound config: %w", err)
+	}
+	rawConfig, err := inboundConfig.Build()
+	if err != nil {
+		return nil, fmt.Errorf("build inbound config: %w", err)
+	}
+	return rawConfig, nil
 }
 
 // restartEmbeddedXray 重启已有的 embedded xray，处理 tunnel 模式端口冲突。
@@ -454,6 +829,14 @@ func (h *ManageHandler) lazyStartEmbeddedXray() error {
 				return fmt.Errorf("start embedded xray: %w", err)
 			}
 			h.embeddedXray = ex
+			if !h.xrayAuthorizedLocked() {
+				// A manual/automatic embedded start while quota is suspended must
+				// not leave config-loaded RelayDock inbounds active. Reapply the
+				// runtime removal immediately; unowned embedded config stays up.
+				if err := h.reapplyUnauthorizedInboundRemovalAfterRuntimeStartLocked(); err != nil {
+					log.Printf("[Manage] Embedded Xray started while unauthorized; managed inbound disable deferred: %v", err)
+				}
+			}
 			if h.onEmbeddedXrayStart != nil {
 				h.onEmbeddedXrayStart(ex)
 			}
@@ -2729,6 +3112,14 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Inbound mutation blocked: "+err.Error())
 		return
 	}
+	if !h.xrayAuthorizedLocked() && action == "add" && strings.TrimSpace(req.MutationID) != "" {
+		// A control-plane-owned inbound must not be created into the live
+		// runtime while its server has no license slot. Unowned/direct Agent API
+		// callers are deliberately left alone so external Xray ownership remains
+		// intact.
+		writeError(w, http.StatusConflict, "RelayDock-managed inbounds are suspended while this server is not authorized")
+		return
+	}
 	if action == "remove" {
 		if skipRemove, _, err := h.beginInboundMutationLocked(action, &req); err != nil {
 			writeError(w, http.StatusConflict, err.Error())
@@ -3418,18 +3809,26 @@ func (h *ManageHandler) manageInboundSniffingExclude(w http.ResponseWriter, ctx 
 // embedded 模式走内嵌 RemoveInbound + AddInbound;外置模式走 HandlerService gRPC。
 // 调用方必须已经持有 inboundsMu。
 func (h *ManageHandler) replaceRuntimeInbound(ctx context.Context, tag string, newInbound map[string]interface{}) error {
+	if !h.xrayAuthorizedLocked() {
+		// Several legacy mutation paths call this helper directly. Load the
+		// sidecar here as well as at their HTTP entrypoint so none of them can
+		// accidentally resurrect a fenced inbound while authorization is off.
+		if err := h.loadInboundMutationFencesLocked(); err != nil {
+			return fmt.Errorf("load managed inbound ownership: %w", err)
+		}
+		if h.isManagedInboundTagLocked(tag) {
+			// Keep the durable config current, but do not let a client/routing
+			// edit resurrect a suspended RelayDock inbound. Authorization
+			// reconciliation will add it back after the control plane grants a
+			// slot again.
+			log.Printf("[Manage] Deferred runtime replacement of unauthorized managed inbound %s", tag)
+			return nil
+		}
+	}
 	if h.xrayMode == "embedded" && h.embeddedXray != nil {
-		inboundJSON, err := json.Marshal(newInbound)
+		rawConfig, err := buildRuntimeInboundConfig(newInbound)
 		if err != nil {
-			return fmt.Errorf("marshal inbound: %w", err)
-		}
-		inboundConfig := &conf.InboundDetourConfig{}
-		if err := json.Unmarshal(inboundJSON, inboundConfig); err != nil {
-			return fmt.Errorf("parse inbound config: %w", err)
-		}
-		rawConfig, err := inboundConfig.Build()
-		if err != nil {
-			return fmt.Errorf("build inbound config: %w", err)
+			return err
 		}
 		_ = h.embeddedXray.RemoveInbound(tag) // 不存在不算错
 		return h.embeddedXray.AddInbound(rawConfig)

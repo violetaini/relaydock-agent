@@ -34,6 +34,16 @@ func RestartXray(method, customCmd string) error {
 	}
 }
 
+// StartXray starts a stopped systemd-managed Xray service without restarting an
+// already running process. It is intentionally narrow: legacy RelayDock Agents
+// only stopped external Xray through systemctl, so a systemctl start is the
+// only safe recovery action. A configured custom "restart" command must not
+// be reused here because it could interrupt a user-managed running instance.
+func StartXray() error {
+	log.Printf("[XrayCtl] Starting stopped xray via systemctl")
+	return runCmd("systemctl", "start", "xray")
+}
+
 func detectMethod() string {
 	// check if systemctl manages xray
 	if err := exec.Command("systemctl", "is-enabled", "xray").Run(); err == nil {

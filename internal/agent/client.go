@@ -148,12 +148,13 @@ type Client struct {
 	onWSConnected    func()
 	onWSDisconnected func()
 
-	// onXrayAuthChange 由 main.go 注入:主控下发的许可证配额授权变化时调用(true=授权→确保 xray 运行,
-	// false=超额→停 xray)。Client 不直接持 ManageHandler 引用,故用回调解耦(仿 onWSConnected 范式)。
+	// onXrayAuthChange 由 main.go 注入:主控下发的许可证配额授权变化时调用。
+	// 它只暂停/恢复 RelayDock-owned inbounds,不会停掉或重启整台 Xray。Client 不直接持
+	// ManageHandler 引用,故用回调解耦(仿 onWSConnected 范式)。
 	onXrayAuthChange func(authorized bool)
 }
 
-// SetXrayAuthHandler 注入「许可证配额授权变化 → 停/启 xray」回调。main.go 启动时调一次。
+// SetXrayAuthHandler 注入「许可证配额授权变化 → 同步托管 inbound」回调。main.go 启动时调一次。
 func (c *Client) SetXrayAuthHandler(fn func(authorized bool)) {
 	c.onXrayAuthChange = fn
 }
@@ -2497,8 +2498,10 @@ func (c *Client) handleConfigUpdate(updates map[string]string) {
 		setDebugLogEnabled(raw == "1" || strings.EqualFold(raw, "true"))
 	}
 
-	// xray_authorized: 主控按许可证「服务器配额」下发的运行授权。超额(0)→ 停 xray;拿到名额(1)→ 启 xray。
-	// 落盘以便重启时立即据此决定是否启动 xray。幂等:与当前值比对,变了才动作(避免 5min 定期兜底反复启停)。
+	// xray_authorized: 主控按许可证「服务器配额」下发的运行授权。超额(0)时只暂停
+	// RelayDock-owned inbounds;拿到名额(1)时通过 Xray runtime API 加回。落盘让
+	// agent 重启后可立即重新同步。每次下发都执行回调,这样 Xray API 短暂不可用或
+	// 管理员手动启动 Xray 后都能在下一次 config_update 自动收敛。
 	// 当前值 nil(首次/未配置)视为已授权 true。
 	if raw, ok := updates["xray_authorized"]; ok {
 		authorized := raw == "1" || strings.EqualFold(raw, "true")
@@ -2513,9 +2516,9 @@ func (c *Client) handleConfigUpdate(updates map[string]string) {
 			} else {
 				log.Printf("[Agent] xray_authorized changed to %v (license quota)", authorized)
 			}
-			if c.onXrayAuthChange != nil {
-				c.onXrayAuthChange(authorized)
-			}
+		}
+		if c.onXrayAuthChange != nil {
+			c.onXrayAuthChange(authorized)
 		}
 	}
 

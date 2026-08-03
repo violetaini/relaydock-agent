@@ -330,12 +330,12 @@ func main() {
 		go ensureGeoData()
 	}
 
-	// 许可证配额授权:主控上次判定本机是否在服务器配额内。超额时主控下发 xray_authorized=0 并由 agent 落盘,
-	// 重启时据此决定是否拉起 xray(「重启立即检查」)。nil/未配置 = 首次或默认 → 授权先跑;
-	// 连上主控后由 handleConfigUpdate 的 xray_authorized 分支校正到最新值。
+	// 许可证配额授权:主控上次判定本机是否在服务器配额内。超额时主控下发 xray_authorized=0 并由 agent 落盘。
+	// 该状态只暂停 RelayDock 自己拥有的 inbound,绝不通过停整台 Xray 影响用户的外部配置;
+	// 连上主控后由 handleConfigUpdate 的 xray_authorized 分支再次校正和重试运行时同步。
 	xrayAuthorized := cfg.XrayAuthorized.Bool(true)
 	if !xrayAuthorized {
-		log.Printf("[Main] 许可证配额:本机上次被主控判定为超额(xray_authorized=0),启动时不拉起 xray,等待主控重新授权")
+		log.Printf("[Main] 许可证配额:本机上次被主控判定为超额(xray_authorized=0),将仅暂停 RelayDock 托管入站")
 	}
 
 	// 嵌入模式：启动内嵌 Xray 实例
@@ -394,28 +394,25 @@ func main() {
 			patchTunnelForwardUDPFullcone(configPath)
 		}
 
-		if !xrayAuthorized {
-			// 超额未授权:准备好配置但不启动 xray。留 embeddedXray=nil,待主控重新授权时
-			// 由 StartXray → lazyStartEmbeddedXray 拉起。embedded tunnel 模式下 nginx 接管 443。
-			log.Printf("[Main] 许可证配额未授权,跳过 embedded Xray 启动(配置已就绪)")
+		// Embedded Xray still starts on normal Agent boot even when the server is
+		// not authorized. Authorization then removes only RelayDock-owned
+		// inbounds, leaving imported/user-managed components intact.
+		log.Printf("[Main] Starting embedded Xray with config: %s", configPath)
+		embeddedXray = embedded.New(configPath)
+		if err := embeddedXray.Start(); err != nil {
+			log.Printf("[Main] Warning: embedded Xray failed to start (will retry via lazy-start): %v", err)
+			embeddedXray = nil
 		} else {
-			log.Printf("[Main] Starting embedded Xray with config: %s", configPath)
-			embeddedXray = embedded.New(configPath)
-			if err := embeddedXray.Start(); err != nil {
-				log.Printf("[Main] Warning: embedded Xray failed to start (will retry via lazy-start): %v", err)
-				embeddedXray = nil
-			} else {
-				manageHandler.SetEmbeddedXray(embeddedXray)
-			}
+			manageHandler.SetEmbeddedXray(embeddedXray)
 		}
 	}
 
 	// 外部模式：启动时自动检测并补全 xray 配置
 	if embeddedXray == nil && !xrayAuthorized {
-		// 超额未授权(external 模式,或 embedded 未授权跳过启动):停掉 xray,等待主控重新授权。
-		// tunnel 模式下 StopXray 会先让 nginx 接管 443。
-		log.Printf("[Main] 许可证配额未授权,停止 xray 服务")
-		manageHandler.StopXray()
+		// Do not stop or restart an externally managed Xray merely because this
+		// server is out of RelayDock quota. Runtime authorization sync below
+		// removes only fenced RelayDock inbounds after normal startup setup.
+		log.Printf("[Main] 许可证配额未授权,保留外置 xray 服务并跳过自动配置重启")
 	} else if embeddedXray == nil && pendingInboundRecovery {
 		log.Printf("[Main] Pending inbound mutation detected; deferring external Xray config auto-update until recovery")
 	} else if embeddedXray == nil {
@@ -447,6 +444,9 @@ func main() {
 			log.Printf("[Main] Pending inbound ownership remains blocked: %v", err)
 		}
 	}
+	if err := manageHandler.ApplyXrayAuthorization(xrayAuthorized); err != nil {
+		log.Printf("[Main] Initial RelayDock inbound authorization sync deferred: %v", err)
+	}
 
 	// 创建 agent 客户端
 	agentClient := agent.NewClient(cfg)
@@ -461,18 +461,14 @@ func main() {
 	manageHandler.OnEmbeddedXrayStart(func(ex *embedded.EmbeddedXray) {
 		agentClient.SetEmbeddedXray(ex)
 	})
-	// 注入许可证配额授权回调:主控下发 xray_authorized 变化时,授权→启 xray、超额→停 xray。
-	// 复用 ManageHandler 的 StopXray/StartXray(含 embedded/external + tunnel 模式 nginx 443 让路)。
+	// 注入许可证配额授权回调:主控下发 xray_authorized 时,只通过 Xray runtime API
+	// 暂停/恢复 RelayDock 自己拥有的 inbound,不再停止或重启整个 Xray 进程。
 	agentClient.SetXrayAuthHandler(func(authorized bool) {
-		if authorized {
-			log.Printf("[Main] 许可证配额:已授权,启动 xray")
-			if err := manageHandler.StartXray(); err != nil {
-				log.Printf("[Main] 许可证配额授权后启动 xray 失败: %v", err)
-			}
-		} else {
-			log.Printf("[Main] 许可证配额:超额,停止 xray")
-			manageHandler.StopXray()
+		if err := manageHandler.ApplyXrayAuthorization(authorized); err != nil {
+			log.Printf("[Main] 许可证配额运行时同步失败(下次 config_update 会重试): %v", err)
+			return
 		}
+		log.Printf("[Main] 许可证配额运行时同步完成: authorized=%v", authorized)
 	})
 	// lazyStartEmbeddedXray 可能在回调注册前已经执行（EnsureXrayConfig 触发），补偿传递
 	if ex := manageHandler.GetEmbeddedXray(); ex != nil && embeddedXray == nil {
