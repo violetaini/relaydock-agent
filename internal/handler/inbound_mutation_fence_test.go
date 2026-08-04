@@ -351,6 +351,90 @@ func TestPendingInboundMutationAfterConfigWriteCommitsNewOwner(t *testing.T) {
 	}
 }
 
+func TestPendingInboundRecoveryDoesNotStartStoppedXray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbound-fences.json")
+	handler := newInboundMutationFenceTestHandler(path)
+	seedInboundMutationOwner(t, handler, "same-tag", "generation-old")
+	configPath := inboundMutationFenceTestConfigPath(path)
+	previous := readInboundMutationTestConfig(t, configPath, "same-tag")
+	intended := map[string]interface{}{"tag": "same-tag", "port": float64(2443)}
+
+	handler.inboundsMu.Lock()
+	_, err := handler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID: "generation-new",
+		Inbound:    intended,
+	}, configPath, previous)
+	handler.inboundsMu.Unlock()
+	if err != nil {
+		t.Fatalf("reserve pending mutation: %v", err)
+	}
+	writeInboundMutationTestConfig(t, configPath, intended)
+
+	reloaded := newInboundMutationFenceTestHandler(path)
+	reloaded.xrayStatusResolver = func() *ServiceStatus {
+		return &ServiceStatus{Installed: true, Running: false}
+	}
+	err = reloaded.RecoverInboundMutationFences()
+	if err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("stopped Xray recovery error = %v, want deferred recovery", err)
+	}
+	if reloaded.inboundMutationFences["same-tag"].Pending == nil {
+		t.Fatal("stopped Xray recovery discarded the pending fence")
+	}
+	if _, err := reloaded.annotateInboundMutationInventoryLocked([]map[string]interface{}{{"tag": "same-tag"}}); err == nil {
+		t.Fatal("stopped Xray recovery published the pending owner")
+	}
+}
+
+func TestPendingInboundRecoveryUsesRuntimeApplyWithoutRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbound-fences.json")
+	handler := newInboundMutationFenceTestHandler(path)
+	seedInboundMutationOwner(t, handler, "same-tag", "generation-old")
+	configPath := inboundMutationFenceTestConfigPath(path)
+	previous := readInboundMutationTestConfig(t, configPath, "same-tag")
+	intended := map[string]interface{}{"tag": "same-tag", "port": float64(2443)}
+
+	handler.inboundsMu.Lock()
+	_, err := handler.beginInboundAddMutationLocked(&InboundRequest{
+		MutationID: "generation-new",
+		Inbound:    intended,
+	}, configPath, previous)
+	handler.inboundsMu.Unlock()
+	if err != nil {
+		t.Fatalf("reserve pending mutation: %v", err)
+	}
+	writeInboundMutationTestConfig(t, configPath, intended)
+
+	restartMarker := filepath.Join(t.TempDir(), "xray-restarted")
+	reloaded := newInboundMutationFenceTestHandler(path)
+	reloaded.restartMethod = "custom"
+	reloaded.restartCommand = "printf restarted > " + restartMarker
+	reloaded.xrayStatusResolver = func() *ServiceStatus {
+		return &ServiceStatus{Installed: true, Running: true}
+	}
+	applyCount := 0
+	reloaded.inboundMutationRuntimeApply = func(_ context.Context, tag string, inbound map[string]interface{}, present bool) error {
+		applyCount++
+		if tag != "same-tag" || !present || fmt.Sprint(inbound["port"]) != "2443" {
+			t.Fatalf("unexpected runtime convergence tag=%q present=%v inbound=%#v", tag, present, inbound)
+		}
+		return nil
+	}
+
+	if err := reloaded.RecoverInboundMutationFences(); err != nil {
+		t.Fatalf("recover pending inbound mutation: %v", err)
+	}
+	if applyCount != 1 {
+		t.Fatalf("runtime apply count=%d, want 1", applyCount)
+	}
+	if _, err := os.Stat(restartMarker); !os.IsNotExist(err) {
+		t.Fatalf("pending recovery unexpectedly restarted Xray: %v", err)
+	}
+	if reloaded.inboundMutationFences["same-tag"].Pending != nil {
+		t.Fatal("pending fence was not resolved after runtime convergence")
+	}
+}
+
 func TestPendingInboundMutationFailsClosedWhenConfigPathsDisagree(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "inbound-fences.json")

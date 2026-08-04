@@ -100,7 +100,15 @@ func injectAccessLog(data []byte) []byte {
 }
 
 func buildCoreConfig(configPath string) (*core.Config, error) {
+	return buildCoreConfigWithSuppressedInbounds(configPath, nil)
+}
+
+func buildCoreConfigWithSuppressedInbounds(configPath string, suppressed map[string]struct{}) (*core.Config, error) {
 	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+	data, err = suppressConfiguredInbounds(data, suppressed)
 	if err != nil {
 		return nil, err
 	}
@@ -161,4 +169,53 @@ func buildCoreConfig(configPath string) (*core.Config, error) {
 	pbConfig.App = append(customApps, filtered...)
 
 	return pbConfig, nil
+}
+
+// suppressConfiguredInbounds removes selected inbound tags from an in-memory
+// config copy before core construction. It deliberately leaves the on-disk
+// configuration intact: authorization recovery restores only the runtime
+// inbound and never has to rewrite a user's Xray configuration.
+func suppressConfiguredInbounds(data []byte, suppressed map[string]struct{}) ([]byte, error) {
+	if len(suppressed) == 0 {
+		return data, nil
+	}
+
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parse config before inbound suppression: %w", err)
+	}
+	rawInbounds, ok := config["inbounds"]
+	if !ok {
+		return data, nil
+	}
+
+	var inbounds []json.RawMessage
+	if err := json.Unmarshal(rawInbounds, &inbounds); err != nil {
+		return nil, fmt.Errorf("parse config inbounds before suppression: %w", err)
+	}
+
+	filtered := make([]json.RawMessage, 0, len(inbounds))
+	for _, inbound := range inbounds {
+		var descriptor struct {
+			Tag string `json:"tag"`
+		}
+		if err := json.Unmarshal(inbound, &descriptor); err != nil {
+			return nil, fmt.Errorf("parse inbound before suppression: %w", err)
+		}
+		if _, blocked := suppressed[strings.TrimSpace(descriptor.Tag)]; blocked {
+			continue
+		}
+		filtered = append(filtered, inbound)
+	}
+
+	encoded, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, fmt.Errorf("encode filtered inbounds: %w", err)
+	}
+	config["inbounds"] = encoded
+	data, err = json.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("encode config after inbound suppression: %w", err)
+	}
+	return data, nil
 }

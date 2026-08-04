@@ -68,6 +68,7 @@ const (
 const (
 	CapabilityAgentUninstallV2    = "agent_uninstall_v2"
 	CapabilityXrayVersionSelectV1 = "xray_version_select_v1"
+	CapabilityXrayAuthorizationV2 = "xray_authorization_v2"
 )
 
 const (

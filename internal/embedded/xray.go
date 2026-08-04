@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,12 +20,13 @@ import (
 )
 
 type EmbeddedXray struct {
-	configPath   string
-	instance     *core.Instance
-	dispatcher   *mydispatcher.Dispatcher
-	statsManager stats.Manager
-	speedMonitor *SpeedMonitor
-	mu           sync.RWMutex
+	configPath            string
+	instance              *core.Instance
+	dispatcher            *mydispatcher.Dispatcher
+	statsManager          stats.Manager
+	speedMonitor          *SpeedMonitor
+	suppressedInboundTags map[string]struct{}
+	mu                    sync.RWMutex
 }
 
 func New(configPath string) *EmbeddedXray {
@@ -38,6 +40,45 @@ func (e *EmbeddedXray) GetSpeedMonitor() *SpeedMonitor {
 	return e.speedMonitor
 }
 
+// SetSuppressedInboundTags excludes the supplied inbound tags every time this
+// embedded instance loads its durable configuration. The durable file is never
+// rewritten: callers can later add an authorized inbound back through Xray's
+// runtime API without losing its definition.
+//
+// ManageHandler updates this immediately before a start or restart while it
+// holds its inbound lifecycle lock, so Start observes a stable authorization
+// decision and never briefly binds a suspended RelayDock-owned listener.
+func (e *EmbeddedXray) SetSuppressedInboundTags(tags []string) {
+	filtered := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag != "" {
+			filtered[tag] = struct{}{}
+		}
+	}
+
+	e.mu.Lock()
+	if len(filtered) == 0 {
+		e.suppressedInboundTags = nil
+	} else {
+		e.suppressedInboundTags = filtered
+	}
+	e.mu.Unlock()
+}
+
+func (e *EmbeddedXray) suppressedInboundTagsSnapshot() map[string]struct{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if len(e.suppressedInboundTags) == 0 {
+		return nil
+	}
+	tags := make(map[string]struct{}, len(e.suppressedInboundTags))
+	for tag := range e.suppressedInboundTags {
+		tags[tag] = struct{}{}
+	}
+	return tags
+}
+
 func (e *EmbeddedXray) Start() (retErr error) {
 	// xray-core 内部偶发 panic(端口冲突 / 配置异常等)。没有 recover 时整个 agent 进程被带崩,
 	// 主控看到 "connection reset by peer";加 recover 后返回 error,handler 正常回 500。
@@ -46,7 +87,7 @@ func (e *EmbeddedXray) Start() (retErr error) {
 			retErr = fmt.Errorf("xray start panicked: %v", r)
 		}
 	}()
-	pbConfig, err := buildCoreConfig(e.configPath)
+	pbConfig, err := buildCoreConfigWithSuppressedInbounds(e.configPath, e.suppressedInboundTagsSnapshot())
 	if err != nil {
 		return err
 	}

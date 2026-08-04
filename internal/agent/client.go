@@ -148,13 +148,13 @@ type Client struct {
 	onWSConnected    func()
 	onWSDisconnected func()
 
-	// onXrayAuthChange 由 main.go 注入:主控下发的许可证配额授权变化时调用。
+	// onXrayAuthChange 由 main.go 注入:主控下发的面板托管入站授权变化时调用。
 	// 它只暂停/恢复 RelayDock-owned inbounds,不会停掉或重启整台 Xray。Client 不直接持
 	// ManageHandler 引用,故用回调解耦(仿 onWSConnected 范式)。
 	onXrayAuthChange func(authorized bool)
 }
 
-// SetXrayAuthHandler 注入「许可证配额授权变化 → 同步托管 inbound」回调。main.go 启动时调一次。
+// SetXrayAuthHandler 注入「面板托管入站授权变化 → 同步托管 inbound」回调。main.go 启动时调一次。
 func (c *Client) SetXrayAuthHandler(fn func(authorized bool)) {
 	c.onXrayAuthChange = fn
 }
@@ -661,7 +661,7 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 		"warp_installed":      warpInstalled,
 		"same_host_as_master": c.sameHostAsMaster(), // 主控同机 → 前端可显示「反代主控」入口
 		"agent_version":       version.Version,      // 主控经 WS auth 直接拿版本,不再反向 HTTP 拉 /api/child/system/info(端口隐身后仍可显示)
-		"xray_mode":           c.config.XrayMode,    // 上报当前运行模式,主控据此校正 embedded→external 漂移(license 恢复后自动拉回 embedded)
+		"xray_mode":           c.config.XrayMode,    // 上报当前运行模式,主控据此校正 embedded→external 漂移
 		"capabilities":        advertisedCapabilities(rpcAvailable, util.SupportsAgentUninstallV2()),
 	})
 
@@ -706,6 +706,7 @@ func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported bool) map[st
 		"stream":                                rpcAvailable,
 		constants.CapabilityAgentUninstallV2:    agentUninstallV2Supported,
 		constants.CapabilityXrayVersionSelectV1: true,
+		constants.CapabilityXrayAuthorizationV2: true,
 	}
 }
 
@@ -890,7 +891,8 @@ func (c *Client) sendTrafficData(conn *websocket.Conn) error {
 	c.lastLimitEvalTime = now
 
 	payloadMap := map[string]interface{}{
-		"stats": stats,
+		"stats":        stats,
+		"capabilities": advertisedCapabilities(c.rpcMux != nil, util.SupportsAgentUninstallV2()),
 	}
 
 	// 系统级网卡累计 RX/TX —— 主控按 server.traffic_source='system' 时改用这两个值替代 xray 流量,
@@ -1384,6 +1386,10 @@ func (c *Client) sendTrafficHTTP(ctx context.Context) error {
 	sysRx, sysTx := c.getSystemNetworkStats()
 	payloadMap := map[string]interface{}{
 		"stats": stats,
+		// HTTP/pull mode has no active WS RPC channel, but it must still declare
+		// panel-managed inbound authorization support so the master can safely send
+		// xray_authorized to this fixed Agent generation.
+		"capabilities": advertisedCapabilities(false, util.SupportsAgentUninstallV2()),
 		"system": map[string]int64{
 			"rx_total":       sysRx,
 			"tx_total":       sysTx,
@@ -2498,8 +2504,8 @@ func (c *Client) handleConfigUpdate(updates map[string]string) {
 		setDebugLogEnabled(raw == "1" || strings.EqualFold(raw, "true"))
 	}
 
-	// xray_authorized: 主控按许可证「服务器配额」下发的运行授权。超额(0)时只暂停
-	// RelayDock-owned inbounds;拿到名额(1)时通过 Xray runtime API 加回。落盘让
+	// xray_authorized: 主控下发的面板托管入站授权。未授权(0)时只暂停
+	// RelayDock-owned inbounds;重新授权(1)时通过 Xray runtime API 加回。落盘让
 	// agent 重启后可立即重新同步。每次下发都执行回调,这样 Xray API 短暂不可用或
 	// 管理员手动启动 Xray 后都能在下一次 config_update 自动收敛。
 	// 当前值 nil(首次/未配置)视为已授权 true。
@@ -2514,7 +2520,7 @@ func (c *Client) handleConfigUpdate(updates map[string]string) {
 			if err := c.persistConfigField("xray_authorized", strconv.FormatBool(authorized)); err != nil {
 				log.Printf("[Agent] Failed to persist xray_authorized: %v", err)
 			} else {
-				log.Printf("[Agent] xray_authorized changed to %v (license quota)", authorized)
+				log.Printf("[Agent] xray_authorized changed to %v (managed inbound authorization)", authorized)
 			}
 		}
 		if c.onXrayAuthChange != nil {

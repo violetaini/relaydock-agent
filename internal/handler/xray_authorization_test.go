@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,20 +39,12 @@ func TestManagedInboundDefinitionsFromInventoryKeepsStaleFencedTags(t *testing.T
 	}
 }
 
-func TestApplyXrayAuthorizationRestoresLegacyStoppedExternalWithStartOnly(t *testing.T) {
+func TestApplyXrayAuthorizationDoesNotStartStoppedExternalAfterGrant(t *testing.T) {
 	handler := NewManageHandler("", "custom", "this-command-must-not-run")
 	handler.SetXrayMode("external")
 	handler.xrayAuthorized = false
 	handler.xrayAuthorizationKnown = true
 
-	status := &ServiceStatus{Installed: true, Running: false}
-	handler.xrayStatusResolver = func() *ServiceStatus { return status }
-	startCalls := 0
-	handler.externalXrayStarter = func() error {
-		startCalls++
-		status.Running = true
-		return nil
-	}
 	definitions := []managedInboundDefinition{
 		{tag: "managed", inbound: map[string]interface{}{"tag": "managed"}},
 		{tag: "stale"},
@@ -71,45 +62,25 @@ func TestApplyXrayAuthorizationRestoresLegacyStoppedExternalWithStartOnly(t *tes
 	}
 
 	if err := handler.ApplyXrayAuthorization(true); err != nil {
-		t.Fatalf("reauthorize legacy-stopped external Xray: %v", err)
-	}
-	if startCalls != 1 {
-		t.Fatalf("external start calls=%d want 1", startCalls)
-	}
-	if !status.Running {
-		t.Fatal("legacy recovery did not mark Xray running")
+		t.Fatalf("reauthorize stopped external Xray: %v", err)
 	}
 	if got, want := applies, []authorizationApplyCall{{authorized: true, tags: []string{"managed", "stale"}}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("runtime apply=%#v want %#v", got, want)
 	}
 
-	// A repeated authorized update retries runtime convergence but must not
-	// restart or start an already restored external service.
+	// A repeated authorized update retries runtime convergence but keeps the
+	// manually stopped service untouched.
 	if err := handler.ApplyXrayAuthorization(true); err != nil {
 		t.Fatalf("repeat authorized update: %v", err)
 	}
-	if startCalls != 1 {
-		t.Fatalf("repeat authorized update started external Xray again: %d", startCalls)
-	}
 }
 
-func TestApplyXrayAuthorizationRetriesLegacyExternalStartAfterFailure(t *testing.T) {
+func TestApplyXrayAuthorizationDoesNotStartStoppedEmbeddedAfterGrant(t *testing.T) {
 	handler := NewManageHandler("", "", "")
-	handler.SetXrayMode("external")
+	handler.SetXrayMode("embedded")
 	handler.xrayAuthorized = false
 	handler.xrayAuthorizationKnown = true
 
-	status := &ServiceStatus{Installed: true, Running: false}
-	handler.xrayStatusResolver = func() *ServiceStatus { return status }
-	startCalls := 0
-	handler.externalXrayStarter = func() error {
-		startCalls++
-		if startCalls == 1 {
-			return errors.New("temporary systemd failure")
-		}
-		status.Running = true
-		return nil
-	}
 	handler.xrayAuthorizationInboundResolver = func() ([]managedInboundDefinition, error) {
 		return []managedInboundDefinition{{tag: "managed", inbound: map[string]interface{}{"tag": "managed"}}}, nil
 	}
@@ -119,21 +90,8 @@ func TestApplyXrayAuthorizationRetriesLegacyExternalStartAfterFailure(t *testing
 		return nil
 	}
 
-	if err := handler.ApplyXrayAuthorization(true); err == nil {
-		t.Fatal("first legacy external start unexpectedly succeeded")
-	}
-	if startCalls != 1 {
-		t.Fatalf("first start calls=%d want 1", startCalls)
-	}
-	if runtimeCalls != 0 {
-		t.Fatalf("runtime apply ran despite a failed start: %d", runtimeCalls)
-	}
-
 	if err := handler.ApplyXrayAuthorization(true); err != nil {
-		t.Fatalf("retry legacy external start: %v", err)
-	}
-	if startCalls != 2 {
-		t.Fatalf("retry start calls=%d want 2", startCalls)
+		t.Fatalf("reauthorize stopped embedded Xray: %v", err)
 	}
 	if runtimeCalls != 1 {
 		t.Fatalf("runtime apply calls=%d want 1", runtimeCalls)
@@ -143,14 +101,6 @@ func TestApplyXrayAuthorizationRetriesLegacyExternalStartAfterFailure(t *testing
 func TestApplyXrayAuthorizationDoesNotStartStoppedExternalOnInitialAuthorizedSync(t *testing.T) {
 	handler := NewManageHandler("", "", "")
 	handler.SetXrayMode("external")
-	handler.xrayStatusResolver = func() *ServiceStatus {
-		return &ServiceStatus{Installed: true, Running: false}
-	}
-	startCalls := 0
-	handler.externalXrayStarter = func() error {
-		startCalls++
-		return nil
-	}
 	handler.xrayAuthorizationInboundResolver = func() ([]managedInboundDefinition, error) {
 		return []managedInboundDefinition{{tag: "managed", inbound: map[string]interface{}{"tag": "managed"}}}, nil
 	}
@@ -165,9 +115,6 @@ func TestApplyXrayAuthorizationDoesNotStartStoppedExternalOnInitialAuthorizedSyn
 
 	if err := handler.ApplyXrayAuthorization(true); err != nil {
 		t.Fatalf("initial authorized sync: %v", err)
-	}
-	if startCalls != 0 {
-		t.Fatalf("initial authorized sync started a user-stopped external Xray: %d", startCalls)
 	}
 	if runtimeCalls != 1 {
 		t.Fatalf("runtime calls=%d want 1", runtimeCalls)

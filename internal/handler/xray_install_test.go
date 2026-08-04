@@ -140,4 +140,7 @@ func TestSystemInfoAdvertisesXrayVersionSelection(t *testing.T) {
 	if !payload.Capabilities[constants.CapabilityXrayVersionSelectV1] {
 		t.Fatalf("capabilities=%v", payload.Capabilities)
 	}
+	if !payload.Capabilities[constants.CapabilityXrayAuthorizationV2] {
+		t.Fatalf("runtime authorization capability missing: %v", payload.Capabilities)
+	}
 }

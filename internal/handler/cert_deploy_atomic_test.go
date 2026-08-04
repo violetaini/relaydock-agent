@@ -89,6 +89,9 @@ func TestHandleCertDeployXrayReloadFailureRollsBackPair(t *testing.T) {
 	certPath, keyPath, oldCert, oldKey := writeExistingCertPair(t)
 	handler := NewManageHandler("", "custom", "exit 1")
 	handler.SetXrayMode("external")
+	handler.xrayStatusResolver = func() *ServiceStatus {
+		return &ServiceStatus{Installed: true, Running: true}
+	}
 	payload, err := json.Marshal(CertDeployRequest{
 		Domain:   "example.com",
 		CertPEM:  certPEM,
@@ -115,6 +118,101 @@ func TestHandleCertDeployXrayReloadFailureRollsBackPair(t *testing.T) {
 	assertCertDeployFile(t, certPath, oldCert, 0o600)
 	assertCertDeployFile(t, keyPath, oldKey, 0o640)
 	assertNoCertDeployTemps(t, filepath.Dir(certPath))
+}
+
+func TestHandleCertDeployDoesNotStartStoppedXray(t *testing.T) {
+	certPEM, keyPEM := generateCertDeployPEM(t)
+	certPath, keyPath, _, _ := writeExistingCertPair(t)
+	restartMarker := filepath.Join(t.TempDir(), "xray-restarted")
+	handler := NewManageHandler("", "custom", "printf restarted > "+restartMarker)
+	handler.SetXrayMode("external")
+	handler.xrayStatusResolver = func() *ServiceStatus {
+		return &ServiceStatus{Installed: true, Running: false}
+	}
+	payload, err := json.Marshal(CertDeployRequest{
+		Domain:   "example.com",
+		CertPEM:  certPEM,
+		KeyPEM:   keyPEM,
+		CertPath: certPath,
+		KeyPath:  keyPath,
+		Reload:   "xray",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, constants.PathChildCertDeploy, bytes.NewReader(payload))
+	request.Header.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
+	response := httptest.NewRecorder()
+
+	handler.HandleCertDeploy(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(restartMarker); !os.IsNotExist(err) {
+		t.Fatalf("stopped Xray was unexpectedly restarted: %v", err)
+	}
+	if !strings.Contains(response.Body.String(), "reload deferred") {
+		t.Fatalf("response did not report deferred reload: %s", response.Body.String())
+	}
+	assertCertDeployFile(t, certPath, certPEM, 0o644)
+	assertCertDeployFile(t, keyPath, keyPEM, 0o600)
+}
+
+func TestHandleAutomaticCertDeployDoesNotRestartRunningXray(t *testing.T) {
+	certPEM, keyPEM := generateCertDeployPEM(t)
+	certPath, keyPath, _, _ := writeExistingCertPair(t)
+	restartMarker := filepath.Join(t.TempDir(), "xray-restarted")
+	handler := NewManageHandler("", "custom", "printf restarted > "+restartMarker)
+	handler.SetXrayMode("external")
+	handler.xrayStatusResolver = func() *ServiceStatus {
+		return &ServiceStatus{Installed: true, Running: true}
+	}
+	payload, err := json.Marshal(CertDeployRequest{
+		Domain:    "example.com",
+		CertPEM:   certPEM,
+		KeyPEM:    keyPEM,
+		CertPath:  certPath,
+		KeyPath:   keyPath,
+		Reload:    "xray",
+		Automatic: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, constants.PathChildCertDeploy, bytes.NewReader(payload))
+	request.Header.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
+	response := httptest.NewRecorder()
+
+	handler.HandleCertDeploy(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(restartMarker); !os.IsNotExist(err) {
+		t.Fatalf("automatic certificate deployment restarted Xray: %v", err)
+	}
+	if !strings.Contains(response.Body.String(), "automatic Xray reload suppressed") {
+		t.Fatalf("response did not report suppressed reload: %s", response.Body.String())
+	}
+	assertCertDeployFile(t, certPath, certPEM, 0o644)
+	assertCertDeployFile(t, keyPath, keyPEM, 0o600)
+}
+
+func TestReloadRunningXrayForCertificateDoesNotStartStoppedXray(t *testing.T) {
+	restartMarker := filepath.Join(t.TempDir(), "xray-restarted")
+	handler := NewManageHandler("", "custom", "printf restarted > "+restartMarker)
+	handler.SetXrayMode("external")
+	handler.xrayStatusResolver = func() *ServiceStatus {
+		return &ServiceStatus{Installed: true, Running: false}
+	}
+
+	if err := handler.ReloadRunningXrayForCertificate(); err != nil {
+		t.Fatalf("reload stopped Xray: %v", err)
+	}
+	if _, err := os.Stat(restartMarker); !os.IsNotExist(err) {
+		t.Fatalf("stopped Xray was unexpectedly restarted: %v", err)
+	}
 }
 
 func writeExistingCertPair(t *testing.T) (certPath, keyPath, certContent, keyContent string) {

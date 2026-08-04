@@ -330,12 +330,14 @@ func main() {
 		go ensureGeoData()
 	}
 
-	// 许可证配额授权:主控上次判定本机是否在服务器配额内。超额时主控下发 xray_authorized=0 并由 agent 落盘。
+	// 面板托管入站授权:主控上次判定本机的 RelayDock 托管入站是否可用。未授权时主控下发
+	// xray_authorized=0 并由 agent 落盘。
 	// 该状态只暂停 RelayDock 自己拥有的 inbound,绝不通过停整台 Xray 影响用户的外部配置;
 	// 连上主控后由 handleConfigUpdate 的 xray_authorized 分支再次校正和重试运行时同步。
 	xrayAuthorized := cfg.XrayAuthorized.Bool(true)
+	manageHandler.SetInitialXrayAuthorization(xrayAuthorized)
 	if !xrayAuthorized {
-		log.Printf("[Main] 许可证配额:本机上次被主控判定为超额(xray_authorized=0),将仅暂停 RelayDock 托管入站")
+		log.Printf("[Main] 面板托管入站未获授权(xray_authorized=0),将仅暂停 RelayDock 托管入站")
 	}
 
 	// 嵌入模式：启动内嵌 Xray 实例
@@ -394,12 +396,16 @@ func main() {
 			patchTunnelForwardUDPFullcone(configPath)
 		}
 
-		// Embedded Xray still starts on normal Agent boot even when the server is
-		// not authorized. Authorization then removes only RelayDock-owned
-		// inbounds, leaving imported/user-managed components intact.
+		// An unauthorized embedded boot still runs any user-managed components,
+		// but its initial core config excludes every fenced RelayDock inbound.
+		// This avoids exposing a managed listener between core.Start and the
+		// later runtime authorization synchronization.
 		log.Printf("[Main] Starting embedded Xray with config: %s", configPath)
 		embeddedXray = embedded.New(configPath)
-		if err := embeddedXray.Start(); err != nil {
+		if err := manageHandler.ConfigureEmbeddedXrayForStart(embeddedXray); err != nil {
+			log.Printf("[Main] Refusing embedded Xray start while authorization filter is unresolved: %v", err)
+			embeddedXray = nil
+		} else if err := embeddedXray.Start(); err != nil {
 			log.Printf("[Main] Warning: embedded Xray failed to start (will retry via lazy-start): %v", err)
 			embeddedXray = nil
 		} else {
@@ -409,37 +415,30 @@ func main() {
 
 	// 外部模式：启动时自动检测并补全 xray 配置
 	if embeddedXray == nil && !xrayAuthorized {
-		// Do not stop or restart an externally managed Xray merely because this
-		// server is out of RelayDock quota. Runtime authorization sync below
+		// Do not stop or restart an externally managed Xray merely because its
+		// panel-managed RelayDock inbound authorization is disabled. Runtime synchronization below
 		// removes only fenced RelayDock inbounds after normal startup setup.
-		log.Printf("[Main] 许可证配额未授权,保留外置 xray 服务并跳过自动配置重启")
+		log.Printf("[Main] 面板托管入站未获授权,保留外置 xray 服务并跳过自动配置重启")
 	} else if embeddedXray == nil && pendingInboundRecovery {
-		log.Printf("[Main] Pending inbound mutation detected; deferring external Xray config auto-update until recovery")
+		log.Printf("[Main] Pending inbound mutation detected; leaving external Xray untouched until explicit recovery")
 	} else if embeddedXray == nil {
-		log.Printf("[Main] Running startup xray auto-detection...")
-		result := manageHandler.EnsureXrayConfig()
-		if result.Modified {
-			log.Printf("[Main] Xray config auto-completed on startup, added: %v", result.AddedSections)
-			if err := manageHandler.RestartXray(); err != nil {
-				log.Printf("[Main] Failed to restart xray after config update: %v", err)
-			} else {
-				time.Sleep(1 * time.Second)
-			}
-		} else if result.Error != "" {
-			log.Printf("[Main] Startup xray config check: %s", result.Error)
-		} else {
-			log.Printf("[Main] Xray config OK, no changes needed")
-		}
+		// External Xray can be intentionally stopped or may host user-managed
+		// inbounds. Agent boot must not silently rewrite its config and restart
+		// it just to add RelayDock defaults; explicit panel configuration actions
+		// remain responsible for those changes.
+		log.Printf("[Main] External Xray startup leaves the existing configuration and process state unchanged")
 	}
 
-	// 启动时立刻把缺 tag 的 inbound/outbound 补 tag 写回 xray 配置,不依赖 list 端点触发。
-	// list 端点里的同名兜底也保留,作 defense-in-depth(配置后续被手改回缺 tag 时仍能修)。
-	// 注:放在 EnsureXrayConfig + 可能的 RestartXray 之后,确保 xray 配置已就位、路径稳定。
-	manageHandler.PromoteAllTagsOnStartup()
+	// Embedded Xray owns its standard config path, so normalize missing tags
+	// while starting that owned instance. External Xray configuration belongs to
+	// the operator and stays untouched at Agent boot.
+	if cfg.XrayMode == "embedded" {
+		manageHandler.PromoteAllTagsOnStartup()
+	}
 	if xrayAuthorized {
 		// A crash may leave an inbound ownership WAL pending after its config was
-		// written but before runtime apply. Force runtime to reload the durable
-		// config before that owner is exposed to the control plane.
+		// written but before runtime apply. Hot-synchronize the durable inbound
+		// through HandlerService before that owner is exposed to the control plane.
 		if err := manageHandler.RecoverInboundMutationFences(); err != nil {
 			log.Printf("[Main] Pending inbound ownership remains blocked: %v", err)
 		}
@@ -457,18 +456,20 @@ func main() {
 	// 注入 WARP 状态查询回调,让 auth/heartbeat 上报 warp_installed
 	agentClient.SetWarpStatusFn(warpService.IsInstalled)
 	agentClient.SetNginxModeHook(manageHandler.SetNginxMode)
-	agentClient.SetXrayRestartHandler(manageHandler.RestartXray)
+	// Certificate delivery only reloads an Xray that is already running. It must
+	// not revive a service the operator deliberately stopped.
+	agentClient.SetXrayRestartHandler(manageHandler.ReloadRunningXrayForCertificate)
 	manageHandler.OnEmbeddedXrayStart(func(ex *embedded.EmbeddedXray) {
 		agentClient.SetEmbeddedXray(ex)
 	})
-	// 注入许可证配额授权回调:主控下发 xray_authorized 时,只通过 Xray runtime API
+	// 注入面板托管入站授权回调:主控下发 xray_authorized 时,只通过 Xray runtime API
 	// 暂停/恢复 RelayDock 自己拥有的 inbound,不再停止或重启整个 Xray 进程。
 	agentClient.SetXrayAuthHandler(func(authorized bool) {
 		if err := manageHandler.ApplyXrayAuthorization(authorized); err != nil {
-			log.Printf("[Main] 许可证配额运行时同步失败(下次 config_update 会重试): %v", err)
+			log.Printf("[Main] 面板托管入站授权同步失败(下次 config_update 会重试): %v", err)
 			return
 		}
-		log.Printf("[Main] 许可证配额运行时同步完成: authorized=%v", authorized)
+		log.Printf("[Main] 面板托管入站授权同步完成: authorized=%v", authorized)
 	})
 	// lazyStartEmbeddedXray 可能在回调注册前已经执行（EnsureXrayConfig 触发），补偿传递
 	if ex := manageHandler.GetEmbeddedXray(); ex != nil && embeddedXray == nil {

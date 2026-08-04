@@ -147,16 +147,11 @@ type ManageHandler struct {
 	// also serve user-managed inbounds which RelayDock does not own.
 	xrayAuthorized         bool
 	xrayAuthorizationKnown bool
-	// A denial observed in this Agent process may have been handled by an older
-	// release that stopped external Xray. Keep retrying a start on the later
-	// authorization grant until the service is actually observed running.
-	xrayAuthorizationStartPending bool
 	// The following hooks keep the authorization transition testable without a
 	// live Xray gRPC endpoint. Production leaves them nil.
 	xrayAuthorizationInboundResolver func() ([]managedInboundDefinition, error)
 	xrayAuthorizationRuntimeApply    func(context.Context, bool, []managedInboundDefinition) error
 	xrayStatusResolver               func() *ServiceStatus
-	externalXrayStarter              func() error
 	// certDeployMu serializes certificate pair replacement and service reloads.
 	// Without it, concurrent renewals targeting the same files could snapshot
 	// and roll back each other's certificate/key pair.
@@ -231,6 +226,17 @@ func (h *ManageHandler) SetXrayMode(mode string) {
 	h.xrayMode = mode
 }
 
+// SetInitialXrayAuthorization makes the persisted control-plane decision
+// visible before embedded Xray first loads its configuration. In particular,
+// an Agent restarted while unauthorized must build the embedded core without
+// any fenced RelayDock inbound, rather than briefly removing it afterwards.
+func (h *ManageHandler) SetInitialXrayAuthorization(authorized bool) {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	h.xrayAuthorized = authorized
+	h.xrayAuthorizationKnown = true
+}
+
 // SetNginxMode switches the ownership boundary used by Nginx management APIs.
 func (h *ManageHandler) SetNginxMode(mode string) {
 	h.inboundsMu.Lock()
@@ -298,13 +304,37 @@ func (h *ManageHandler) RestartXray() error {
 	return h.completeInboundMutationRecoveryAfterRuntimeStartLocked()
 }
 
+// ReloadRunningXrayForCertificate reloads a certificate into an already
+// running Xray process. A certificate deployment must never turn an
+// intentionally stopped Xray into a start request: the new certificate stays
+// on disk and is picked up when the operator explicitly starts Xray later.
+func (h *ManageHandler) ReloadRunningXrayForCertificate() error {
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+
+	status := h.currentXrayStatusLocked()
+	if status == nil || !status.Running {
+		log.Printf("[Manage] Xray is stopped; certificate reload deferred")
+		return nil
+	}
+	if err := h.restartXrayLocked(); err != nil {
+		return err
+	}
+	if !h.xrayAuthorizedLocked() {
+		return nil
+	}
+	return h.completeInboundMutationRecoveryAfterRuntimeStartLocked()
+}
+
 // restartXrayLocked restarts Xray while the caller holds inboundsMu.
 func (h *ManageHandler) restartXrayLocked() error {
 	var err error
 	if h.xrayMode == "embedded" {
 		h.embeddedMu.Lock()
 		if h.embeddedXray != nil {
-			err = h.restartEmbeddedXray()
+			if err = h.configureEmbeddedXrayForStartLocked(h.embeddedXray); err == nil {
+				err = h.restartEmbeddedXray()
+			}
 		} else {
 			err = h.lazyStartEmbeddedXray()
 		}
@@ -316,7 +346,7 @@ func (h *ManageHandler) restartXrayLocked() error {
 		return err
 	}
 	// A manual/config-triggered restart must not accidentally resurrect a
-	// RelayDock inbound while the server is out of license quota. The runtime
+	// RelayDock inbound while its panel-managed authorization is disabled. The runtime
 	// reconciliation removes only fenced RelayDock tags; external inbounds stay
 	// untouched.
 	if !h.xrayAuthorizedLocked() {
@@ -328,7 +358,7 @@ func (h *ManageHandler) restartXrayLocked() error {
 }
 
 // StopXray 停止 xray:tunnel 模式先恢复 nginx 443 fallback 再停,让 nginx 接管 443。
-// 与 HandleServiceControl 的 stop 分支同源逻辑。许可证配额切换不调用此方法。
+// 与 HandleServiceControl 的 stop 分支同源逻辑。面板托管入站授权切换不调用此方法。
 func (h *ManageHandler) StopXray() {
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
@@ -348,7 +378,7 @@ func (h *ManageHandler) stopXrayLocked() {
 }
 
 // StartXray 启动 xray:tunnel 模式先移除 nginx 443 fallback 释放端口再启,失败则回滚 fallback。
-// 与 HandleServiceControl 的 start 分支同源逻辑。许可证配额切换不调用此方法。
+// 与 HandleServiceControl 的 start 分支同源逻辑。面板托管入站授权切换不调用此方法。
 func (h *ManageHandler) StartXray() error {
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
@@ -380,14 +410,14 @@ func (h *ManageHandler) startXrayLocked() error {
 // managedInboundDefinition is a RelayDock-owned tag selected by its
 // mutation-fence owner, with an optional durable inbound definition. It
 // deliberately contains no unowned Xray tags. This is the ownership boundary
-// used for license suspension so that a user's external Xray configuration
+// used for managed-inbound authorization suspension so that a user's external Xray configuration
 // keeps serving while RelayDock resources pause.
 type managedInboundDefinition struct {
 	tag     string
 	inbound map[string]interface{}
 }
 
-// ApplyXrayAuthorization applies a control-plane license decision without
+// ApplyXrayAuthorization applies a control-plane managed-inbound authorization decision without
 // stopping or restarting a running Xray process. Unauthorized servers lose
 // only their RelayDock-owned inbounds through HandlerService; authorized
 // servers add those inbounds back through the same runtime API.
@@ -395,17 +425,14 @@ type managedInboundDefinition struct {
 // The persisted config remains intact. That preserves user configuration and
 // lets an independently restarted Xray be reconciled without a destructive
 // config rewrite. Repeated config updates are intentionally idempotent and
-// retry a transient unavailable Xray API.
+// retry a transient unavailable Xray API. A grant never starts a stopped core:
+// historical panel actions and operator stops have no reliable durable distinction.
 func (h *ManageHandler) ApplyXrayAuthorization(authorized bool) error {
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
 
-	wasAuthorized := h.xrayAuthorizedLocked()
 	h.xrayAuthorized = authorized
 	h.xrayAuthorizationKnown = true
-	if !authorized || !wasAuthorized {
-		h.xrayAuthorizationStartPending = true
-	}
 
 	definitions, err := h.managedInboundDefinitionsLocked()
 	if err != nil {
@@ -413,18 +440,6 @@ func (h *ManageHandler) ApplyXrayAuthorization(authorized bool) error {
 	}
 
 	if authorized {
-		// Older Agents stopped the whole external xray.service on quota denial.
-		// Recover that historical state with a start only when no Xray process is
-		// running; never turn an authorization transition into a restart. Do not
-		// start an intentionally stopped service during a normal Agent boot.
-		if !wasAuthorized || h.xrayAuthorizationStartPending {
-			if err := h.startStoppedXrayForAuthorizationLocked(); err != nil {
-				return err
-			}
-			if status := h.currentXrayStatusLocked(); status != nil && status.Running {
-				h.xrayAuthorizationStartPending = false
-			}
-		}
 		if hasPendingInboundMutation(h.inboundMutationFences) {
 			// The no-restart recovery path converges a crash-interrupted inbound
 			// mutation through HandlerService. Do this only after authorization so
@@ -446,6 +461,37 @@ func (h *ManageHandler) xrayAuthorizedLocked() bool {
 	// Test/legacy handlers constructed before this field existed behave like the
 	// historic default: authorized until the control plane explicitly decides.
 	return !h.xrayAuthorizationKnown || h.xrayAuthorized
+}
+
+// ConfigureEmbeddedXrayForStart applies the current authorization decision to
+// a newly created embedded core before Start is called. It does not modify the
+// durable Xray config; authorized runtime reconciliation adds suspended tags
+// back later through the Xray API.
+func (h *ManageHandler) ConfigureEmbeddedXrayForStart(ex *embedded.EmbeddedXray) error {
+	if ex == nil {
+		return fmt.Errorf("embedded Xray is nil")
+	}
+	h.inboundsMu.Lock()
+	defer h.inboundsMu.Unlock()
+	return h.configureEmbeddedXrayForStartLocked(ex)
+}
+
+func (h *ManageHandler) configureEmbeddedXrayForStartLocked(ex *embedded.EmbeddedXray) error {
+	if h.xrayAuthorizedLocked() {
+		ex.SetSuppressedInboundTags(nil)
+		return nil
+	}
+
+	definitions, err := h.managedInboundDefinitionsLocked()
+	if err != nil {
+		return fmt.Errorf("resolve suspended managed inbounds: %w", err)
+	}
+	tags := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		tags = append(tags, definition.tag)
+	}
+	ex.SetSuppressedInboundTags(tags)
+	return nil
 }
 
 func (h *ManageHandler) managedInboundDefinitionsLocked() ([]managedInboundDefinition, error) {
@@ -487,7 +533,7 @@ func managedInboundDefinitionsFromInventory(
 		}
 		// The first source wins. RelayDock mutations persist into the primary
 		// config; an external confdir duplicate must never cause us to overwrite
-		// another component merely to satisfy license reconciliation.
+		// another component merely to satisfy authorization reconciliation.
 		if _, exists := byTag[tag]; !exists {
 			byTag[tag] = inbound
 		}
@@ -523,47 +569,6 @@ func (h *ManageHandler) currentXrayStatusLocked() *ServiceStatus {
 		return h.xrayStatusResolver()
 	}
 	return h.getXrayStatus()
-}
-
-func (h *ManageHandler) startStoppedXrayForAuthorizationLocked() error {
-	status := h.currentXrayStatusLocked()
-	if status == nil || status.Running || !status.Installed {
-		return nil
-	}
-
-	if h.xrayMode == "embedded" {
-		h.embeddedMu.Lock()
-		err := h.lazyStartEmbeddedXray()
-		h.embeddedMu.Unlock()
-		if err != nil {
-			return fmt.Errorf("start previously stopped embedded Xray: %w", err)
-		}
-		return nil
-	}
-
-	starter := h.externalXrayStarter
-	if starter == nil {
-		starter = xrayctl.StartXray
-	}
-	// Older quota denial called StopXray, which installs the managed Nginx
-	// fallback on 443 before stopping Xray. Release that Arcway-owned fallback
-	// before the start or a tunnel inbound cannot bind its port. Reuse-existing
-	// Nginx never receives this mutation, matching the original stop path.
-	releasedFallback := false
-	if h.configNeedsPort443() && !h.reusesExistingNginx() {
-		h.removeFallback443()
-		h.reloadNginx()
-		time.Sleep(300 * time.Millisecond)
-		releasedFallback = true
-	}
-	if err := starter(); err != nil {
-		if releasedFallback {
-			h.deployFallback443()
-			h.reloadNginx()
-		}
-		return fmt.Errorf("start previously stopped external Xray: %w", err)
-	}
-	return nil
 }
 
 func (h *ManageHandler) applyXrayAuthorizationLocked(authorized bool) error {
@@ -821,6 +826,12 @@ func (h *ManageHandler) lazyStartEmbeddedXray() error {
 			}
 
 			ex := embedded.New(p)
+			if err := h.configureEmbeddedXrayForStartLocked(ex); err != nil {
+				if stoppedNginx {
+					_ = nginxStart()
+				}
+				return fmt.Errorf("prepare embedded xray authorization filter: %w", err)
+			}
 			if err := ex.Start(); err != nil {
 				log.Printf("[Manage] Embedded xray start failed: %v", err)
 				if stoppedNginx {
@@ -830,7 +841,7 @@ func (h *ManageHandler) lazyStartEmbeddedXray() error {
 			}
 			h.embeddedXray = ex
 			if !h.xrayAuthorizedLocked() {
-				// A manual/automatic embedded start while quota is suspended must
+				// An embedded start while panel-managed inbound authorization is disabled must
 				// not leave config-loaded RelayDock inbounds active. Reapply the
 				// runtime removal immediately; unowned embedded config stays up.
 				if err := h.reapplyUnauthorizedInboundRemovalAfterRuntimeStartLocked(); err != nil {
@@ -2178,6 +2189,7 @@ func (h *ManageHandler) HandleSystemInfo(w http.ResponseWriter, r *http.Request)
 		"capabilities": map[string]bool{
 			constants.CapabilityAgentUninstallV2:    h.supportsAgentUninstallV2(),
 			constants.CapabilityXrayVersionSelectV1: true,
+			constants.CapabilityXrayAuthorizationV2: true,
 		},
 	}
 
@@ -3114,7 +3126,7 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	if !h.xrayAuthorizedLocked() && action == "add" && strings.TrimSpace(req.MutationID) != "" {
 		// A control-plane-owned inbound must not be created into the live
-		// runtime while its server has no license slot. Unowned/direct Agent API
+		// runtime while its panel-managed authorization is disabled. Unowned/direct Agent API
 		// callers are deliberately left alone so external Xray ownership remains
 		// intact.
 		writeError(w, http.StatusConflict, "RelayDock-managed inbounds are suspended while this server is not authorized")
@@ -3595,16 +3607,32 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 		return
 	}
 	arr, _ := settings[arrKey].([]interface{})
+	respondClientNoOp := func(message string) {
+		// A prior request may have persisted this exact client change while the
+		// live HandlerService was unavailable. Reapply the durable inbound on a
+		// later idempotent request, but never start or restart Xray to do so.
+		if runtimeErr := h.replaceRuntimeInbound(ctx, req.Tag, target); runtimeErr != nil {
+			log.Printf("[Manage] manageInboundClient: no-op runtime reconcile deferred (tag=%s): %v", req.Tag, runtimeErr)
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"success":         true,
+				"message":         message + "; runtime apply deferred",
+				"runtime_warning": runtimeErr.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": message,
+		})
+	}
 
 	switch action {
 	case "add-client":
-		// 幂等:已经在里面就直接返回,不写文件、不触发 runtime 重装。
+		// 幂等:配置无须重写，但仍可尝试把已持久化的定义热同步到
+		// 已运行的 Xray。失败只返回 deferred，不改变核心生命周期。
 		for _, c := range arr {
 			if m, ok := c.(map[string]interface{}); ok && matchClientCredential(m, req.Client, protocol) {
-				writeJSON(w, http.StatusOK, map[string]interface{}{
-					"success": true,
-					"message": "client already present (no-op)",
-				})
+				respondClientNoOp("client already present (no-op)")
 				return
 			}
 		}
@@ -3620,10 +3648,7 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 			filtered = append(filtered, c)
 		}
 		if removed == 0 {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"success": true,
-				"message": "client not found (no-op)",
-			})
+			respondClientNoOp("client not found (no-op)")
 			return
 		}
 		arr = filtered
@@ -3755,6 +3780,18 @@ func (h *ManageHandler) manageInboundSniffingExclude(w http.ResponseWriter, ctx 
 		added++
 	}
 	if added == 0 {
+		// The durable configuration already contains the requested excludes.
+		// Retry only the hot replacement so a prior deferred request can recover
+		// after the operator starts Xray, without creating an implicit restart.
+		if runtimeErr := h.replaceRuntimeInbound(ctx, req.Tag, target); runtimeErr != nil {
+			log.Printf("[Manage] manageInboundSniffingExclude: no-op runtime reconcile deferred (tag=%s): %v", req.Tag, runtimeErr)
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"success":         true,
+				"message":         "all domains already present (no-op); runtime apply deferred",
+				"runtime_warning": runtimeErr.Error(),
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"message": "all domains already present (no-op)",
@@ -5216,31 +5253,9 @@ func (h *ManageHandler) HandleScan(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Manage] Scanning for Xray process...")
 
-	h.inboundsMu.Lock()
-	configResult := h.ensureXrayConfigLocked()
-	var scanRestartErr error
-	if configResult.Modified {
-		scanRestartErr = h.restartXrayLocked()
-	}
-	h.inboundsMu.Unlock()
-
 	response := ScanResponse{
 		Success: true,
 		Message: "Scan completed",
-	}
-
-	if configResult.Modified {
-		response.ConfigModified = true
-		response.ConfigAddedSections = configResult.AddedSections
-		log.Printf("[Manage] Xray config auto-completed, added sections: %v", configResult.AddedSections)
-		if scanRestartErr != nil {
-			log.Printf("[Manage] Failed to restart xray after config update: %v", scanRestartErr)
-		} else {
-			log.Printf("[Manage] Xray restarted after config update")
-			time.Sleep(1 * time.Second)
-		}
-	} else if configResult.Error != "" {
-		log.Printf("[Manage] Xray config check warning: %s", configResult.Error)
 	}
 
 	xrayStatus := h.getXrayStatus()
@@ -5274,9 +5289,6 @@ func (h *ManageHandler) HandleScan(w http.ResponseWriter, r *http.Request) {
 
 	if response.XrayRunning {
 		response.Message = fmt.Sprintf("Xray is running, found %d inbound(s)", len(response.Inbounds))
-		if response.ConfigModified {
-			response.Message += fmt.Sprintf(", config updated: added %v", response.ConfigAddedSections)
-		}
 	} else if xrayStatus != nil && xrayStatus.Installed {
 		response.Message = "Xray is installed but not running"
 	} else {
@@ -5660,12 +5672,13 @@ func (h *ManageHandler) removeDeprecatedRoutingRules(config map[string]interface
 
 // CertDeployRequest 表示主控端下发的证书部署请求。
 type CertDeployRequest struct {
-	Domain   string `json:"domain"`
-	CertPEM  string `json:"cert_pem"`
-	KeyPEM   string `json:"key_pem"`
-	CertPath string `json:"cert_path"`
-	KeyPath  string `json:"key_path"`
-	Reload   string `json:"reload"` // nginx, xray, both, none
+	Domain    string `json:"domain"`
+	CertPEM   string `json:"cert_pem"`
+	KeyPEM    string `json:"key_pem"`
+	CertPath  string `json:"cert_path"`
+	KeyPath   string `json:"key_path"`
+	Reload    string `json:"reload"`              // nginx, xray, both, none
+	Automatic bool   `json:"automatic,omitempty"` // 续签/同步，不得重启 Xray
 }
 
 // 处理 POST /api/child/cert/deploy。
@@ -5692,11 +5705,25 @@ func (h *ManageHandler) HandleCertDeploy(w http.ResponseWriter, r *http.Request)
 	h.certDeployMu.Lock()
 	defer h.certDeployMu.Unlock()
 
-	xrayReload := req.Reload == "xray" || req.Reload == "both"
-	nginxReload := req.Reload == "nginx" || req.Reload == "both"
+	reloadTarget := strings.ToLower(strings.TrimSpace(req.Reload))
+	automaticXrayReloadSuppressed := false
+	if req.Automatic && (reloadTarget == "xray" || reloadTarget == "both") {
+		automaticXrayReloadSuppressed = true
+		if reloadTarget == "both" {
+			reloadTarget = "nginx"
+		} else {
+			reloadTarget = "none"
+		}
+	}
+	xrayReload := reloadTarget == "xray" || reloadTarget == "both"
+	nginxReload := reloadTarget == "nginx" || reloadTarget == "both"
+	xrayWasRunning := false
 	if xrayReload {
 		h.inboundsMu.Lock()
 		defer h.inboundsMu.Unlock()
+		if status := h.currentXrayStatusLocked(); status != nil {
+			xrayWasRunning = status.Running
+		}
 	}
 
 	deployment, err := deployCertFiles(req.CertPEM, req.KeyPEM, req.CertPath, req.KeyPath)
@@ -5721,7 +5748,7 @@ func (h *ManageHandler) HandleCertDeploy(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if xrayReload {
+	if xrayReload && xrayWasRunning {
 		if err := h.restartXrayLocked(); err != nil {
 			recovery := make([]func() error, 0, 2)
 			if nginxReload {
@@ -5755,10 +5782,19 @@ func (h *ManageHandler) HandleCertDeploy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	message := fmt.Sprintf("certificate for %s deployed", req.Domain)
+	if automaticXrayReloadSuppressed {
+		message += "; automatic Xray reload suppressed"
+		log.Printf("[CertDeploy] Suppressed automatic Xray reload for %s", req.Domain)
+	}
+	if xrayReload && !xrayWasRunning {
+		message += "; Xray is stopped, reload deferred"
+		log.Printf("[CertDeploy] Xray is stopped; certificate reload deferred for %s", req.Domain)
+	}
 	log.Printf("[CertDeploy] Successfully deployed cert for %s to %s", req.Domain, req.CertPath)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
-		"message": fmt.Sprintf("certificate for %s deployed", req.Domain),
+		"message": message,
 	})
 }
 

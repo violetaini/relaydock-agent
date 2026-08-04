@@ -71,9 +71,10 @@ type Config struct {
 	// HidePortOnWS 开启时:WS 连接可用期间关闭入站监听端口(隐藏 agent),WS 断开时立即重开以保证
 	// 主控 HTTP/pull 回退可达。*bool 区分"未配置"(默认 true)与显式 false。
 	HidePortOnWS *FlexBool `yaml:"hide_port_on_ws"`
-	// XrayAuthorized 是主控按许可证「服务器配额」下发的运行授权:超出配额的服务器为 false →
-	// agent 通过 Xray runtime API 暂停 RelayDock-owned inbounds,不停止整个 Xray 进程。
+	// XrayAuthorized 是主控下发的「面板托管入站授权」状态:false 时 agent 通过 Xray
+	// runtime API 暂停 RelayDock-owned inbounds,不停止整个 Xray 进程。
 	// 主控通过 config_update 下发并由 agent 落盘,重启时据此重新同步托管 inbound。
+	// 字段名为兼容既有配置而保留为 xray_authorized。
 	// *bool 区分"未配置/首次启动"(nil = 默认授权,先跑)与主控显式判定的 true/false。
 	XrayAuthorized *FlexBool `yaml:"xray_authorized"`
 }

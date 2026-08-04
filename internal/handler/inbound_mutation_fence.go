@@ -125,9 +125,10 @@ func (h *ManageHandler) HasPendingInboundMutationRecovery() (bool, error) {
 	return hasPendingInboundMutation(h.inboundMutationFences), nil
 }
 
-// RecoverInboundMutationFences converges the Xray runtime to its durable config
-// before a pending owner can become authoritative. It must run after Xray mode
-// selection and startup; callers should retry it after a later successful start.
+// RecoverInboundMutationFences converges a pending RelayDock inbound through
+// HandlerService before its owner can become authoritative. It never restarts
+// Xray; callers should retry it after a later explicit start when the runtime
+// API is unavailable.
 func (h *ManageHandler) RecoverInboundMutationFences() error {
 	h.inboundsMu.Lock()
 	defer h.inboundsMu.Unlock()
@@ -146,12 +147,18 @@ func (h *ManageHandler) recoverInboundMutationFencesLocked() error {
 	if err := h.validatePendingInboundMutationsLocked(); err != nil {
 		return err
 	}
-	restartRuntime := h.inboundMutationRuntimeConverge
-	if restartRuntime == nil {
-		restartRuntime = h.restartXrayLocked
-	}
-	if err := restartRuntime(); err != nil {
-		return fmt.Errorf("restart Xray runtime for pending inbound mutation: %w", err)
+	runtimeConverge := h.inboundMutationRuntimeConverge
+	if runtimeConverge == nil {
+		// Recovery must not turn a crash-interrupted RelayDock mutation into an
+		// implicit service start or restart. A stopped Xray may be intentionally
+		// stopped by its operator; keep the ownership fence closed until they
+		// explicitly start it, then HandlerService can converge the inbounds.
+		status := h.currentXrayStatusLocked()
+		if status == nil || !status.Running {
+			return fmt.Errorf("Xray is stopped; pending inbound recovery deferred until explicit start")
+		}
+	} else if err := runtimeConverge(); err != nil {
+		return fmt.Errorf("prepare Xray runtime for pending inbound mutation: %w", err)
 	}
 	if err := h.convergePendingInboundRuntimeLocked(); err != nil {
 		return fmt.Errorf("converge Xray runtime for pending inbound mutation: %w", err)
