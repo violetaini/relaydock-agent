@@ -33,6 +33,8 @@ import (
 	"github.com/violetaini/relaydock-agent/internal/xrpc"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
+	routercommand "github.com/xtls/xray-core/app/router/command"
+	xserial "github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf"
 )
@@ -4334,6 +4336,32 @@ func applyObservatory(config map[string]interface{}, key string, raw json.RawMes
 	}
 }
 
+func applyRoutingRulesHot(ctx context.Context, routingClient routercommand.RoutingServiceClient, routing map[string]interface{}) error {
+	raw, err := json.Marshal(routing)
+	if err != nil {
+		return fmt.Errorf("marshal routing config: %w", err)
+	}
+	var routingConfig conf.RouterConfig
+	if err := json.Unmarshal(raw, &routingConfig); err != nil {
+		return fmt.Errorf("decode routing config: %w", err)
+	}
+	built, err := routingConfig.Build()
+	if err != nil {
+		return fmt.Errorf("build routing config: %w", err)
+	}
+	message := xserial.ToTypedMessage(built)
+	if message == nil {
+		return errors.New("build routing typed message")
+	}
+	if _, err := routingClient.AddRule(ctx, &routercommand.AddRuleRequest{
+		Config:       message,
+		ShouldAppend: false,
+	}); err != nil {
+		return fmt.Errorf("replace runtime routing rules: %w", err)
+	}
+	return nil
+}
+
 func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 	var req RoutingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4376,17 +4404,28 @@ func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to parse config: %v", err))
 		return
 	}
+	originalRouting, _ := config["routing"].(map[string]interface{})
+	if originalRouting == nil {
+		originalRouting = map[string]interface{}{}
+	}
+	hotReplace := action == "set_hot"
 
 	switch action {
-	case "set":
+	case "set", "set_hot":
 		if req.Routing == nil {
 			writeError(w, http.StatusBadRequest, "Routing config is required")
 			return
 		}
+		if hotReplace && (len(req.Observatory) != 0 || len(req.BurstObservatory) != 0) {
+			writeError(w, http.StatusBadRequest, "set_hot only replaces routing rules")
+			return
+		}
 		config["routing"] = req.Routing
 		// 负载均衡 leastPing/leastLoad 的顶层观测站:对象=写入,JSON null=删除,缺失=不动。
-		applyObservatory(config, "observatory", req.Observatory)
-		applyObservatory(config, "burstObservatory", req.BurstObservatory)
+		if !hotReplace {
+			applyObservatory(config, "observatory", req.Observatory)
+			applyObservatory(config, "burstObservatory", req.BurstObservatory)
+		}
 
 	case "add_rule":
 		if req.Rule == nil {
@@ -4499,6 +4538,65 @@ func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if hotReplace {
+		status := h.currentXrayStatusLocked()
+		if status == nil || !status.Running {
+			newContent, err := json.MarshalIndent(config, "", "  ")
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to marshal config: %v", err))
+				return
+			}
+			if err := writeXrayConfigAtomic(configPath, newContent); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist routing config: %v", err))
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"success":         true,
+				"runtime_applied": false,
+				"message":         "Routing persisted; runtime apply deferred because Xray is stopped",
+			})
+			return
+		}
+		apiPort := h.findXrayAPIPort()
+		if apiPort == 0 {
+			writeError(w, http.StatusInternalServerError, "Xray API not available")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		clients, err := xrpc.New(ctx, "127.0.0.1", uint16(apiPort))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to connect to Xray routing API: %v", err))
+			return
+		}
+		defer clients.Connection.Close()
+		if err := applyRoutingRulesHot(ctx, clients.Routing, req.Routing); err != nil {
+			writeError(w, http.StatusConflict, fmt.Sprintf("Failed to hot-apply routing rules (upgrade the Xray core if AddRule is unavailable): %v", err))
+			return
+		}
+		newContent, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			_ = applyRoutingRulesHot(ctx, clients.Routing, originalRouting)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to marshal config: %v", err))
+			return
+		}
+		if err := writeXrayConfigAtomic(configPath, newContent); err != nil {
+			rollbackErr := applyRoutingRulesHot(ctx, clients.Routing, originalRouting)
+			if rollbackErr != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist routing config: %v; runtime rollback failed: %v", err, rollbackErr))
+				return
+			}
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist routing config: %v; runtime rules restored", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success":         true,
+			"runtime_applied": true,
+			"message":         "Routing updated in runtime and persisted without restarting Xray",
+		})
+		return
+	}
+
 	newContent, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to marshal config: %v", err))
@@ -4512,8 +4610,10 @@ func (h *ManageHandler) manageRouting(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Manage] Routing config updated")
 
-	// xray routing 不支持动态加/改 rule(没有 gRPC API),必须重启进程才能加载新配置。
-	// 默认 agent 自己重启;批量调用(主控套餐绑定 / 解绑)显式传 no_restart=true 让主控统一在末尾重启,避免 N 次串行重启。
+	// The legacy `set` action also changes top-level observatory configuration,
+	// which RoutingService cannot replace safely. Automatic control-plane paths
+	// use `set_hot` above; this restart is reserved for an explicit full routing
+	// edit from an older/manual caller.
 	if req.NoRestart {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
@@ -4572,7 +4672,8 @@ type BatchRoutingAddition struct {
 type BatchApplyRequest struct {
 	InboundClients       []BatchInboundClient   `json:"inbound_clients,omitempty"`
 	RoutingUserAdditions []BatchRoutingAddition `json:"routing_user_additions,omitempty"`
-	// NoRestart=true 时改完 routing 不自动重启 xray(主控统一末尾重启)。
+	// NoRestart is retained for backward wire compatibility. Routing mutations
+	// are now hot-applied when Xray is running and never restart it.
 	NoRestart bool `json:"no_restart,omitempty"`
 }
 
@@ -4727,6 +4828,12 @@ func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("parse config: %v", err))
 		return
 	}
+	originalRouting := map[string]interface{}{}
+	if current, ok := config["routing"].(map[string]interface{}); ok {
+		if raw, marshalErr := json.Marshal(current); marshalErr == nil {
+			_ = json.Unmarshal(raw, &originalRouting)
+		}
+	}
 
 	result := BatchApplyResult{
 		InboundResults: make([]string, len(req.InboundClients)),
@@ -4788,14 +4895,44 @@ func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("marshal config: %v", err))
 		return
 	}
-	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, newContent, 0644); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("write tmp config: %v", err))
-		return
+
+	var routingClients *xrpc.Clients
+	routingRuntimeApplied := false
+	if routingChanged {
+		status := h.currentXrayStatusLocked()
+		if status != nil && status.Running {
+			apiPort := h.findXrayAPIPort()
+			if apiPort == 0 {
+				writeError(w, http.StatusInternalServerError, "Xray API not available")
+				return
+			}
+			hotCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			clients, connectErr := xrpc.New(hotCtx, "127.0.0.1", uint16(apiPort))
+			if connectErr != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("connect to Xray routing API: %v", connectErr))
+				return
+			}
+			routingClients = clients
+			defer routingClients.Connection.Close()
+			routing, _ := config["routing"].(map[string]interface{})
+			if hotErr := applyRoutingRulesHot(hotCtx, routingClients.Routing, routing); hotErr != nil {
+				writeError(w, http.StatusConflict, fmt.Sprintf("hot-apply routing: %v", hotErr))
+				return
+			}
+			routingRuntimeApplied = true
+		}
 	}
-	if err := os.Rename(tmp, configPath); err != nil {
-		os.Remove(tmp)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("rename config: %v", err))
+	if err := writeXrayConfigAtomic(configPath, newContent); err != nil {
+		if routingRuntimeApplied {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if rollbackErr := applyRoutingRulesHot(rollbackCtx, routingClients.Routing, originalRouting); rollbackErr != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist config: %v; runtime routing rollback failed: %v", err, rollbackErr))
+				return
+			}
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist config: %v", err))
 		return
 	}
 
@@ -4811,30 +4948,10 @@ func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// routing 改动需要 xray restart 才能生效;NoRestart=true 时由 caller 统一末尾重启。
-	if routingChanged && !req.NoRestart {
-		if err := h.restartXrayLocked(); err != nil {
-			// 同 manageRouting 的防呆:坏配置让 xray 起不来时回滚到旧配置并重启,避免持久化坏配置把
-			// agent 弄挂(否则 gRPC API 死掉、所有出站添加报 connection reset,重启无效只能手删)。
-			log.Printf("[BatchApply] restart xray failed, rolling back: %v", err)
-			rolledBack := false
-			if werr := os.WriteFile(configPath, content, 0644); werr == nil {
-				if rerr := h.restartXrayLocked(); rerr == nil {
-					rolledBack = true
-				}
-			}
-			if rolledBack {
-				result.Message = "routing change rejected: new config failed to start xray, rolled back: " + err.Error()
-			} else {
-				result.Message = "config persisted, xray restart failed (rollback also failed): " + err.Error()
-			}
-		} else {
-			result.RestartedXray = true
-		}
-	}
-
 	result.Success = true
-	if result.Message == "" {
+	if routingChanged && !routingRuntimeApplied {
+		result.Message = "batch persisted; routing runtime apply deferred because Xray is stopped"
+	} else {
 		result.Message = fmt.Sprintf("applied %d inbound + %d routing changes", len(affectedInbounds), len(req.RoutingUserAdditions))
 	}
 	writeJSON(w, http.StatusOK, result)
