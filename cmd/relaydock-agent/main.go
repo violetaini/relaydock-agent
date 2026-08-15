@@ -32,6 +32,7 @@ import (
 	"github.com/violetaini/relaydock-agent/internal/discovery"
 	"github.com/violetaini/relaydock-agent/internal/embedded"
 	"github.com/violetaini/relaydock-agent/internal/handler"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
 	"github.com/violetaini/relaydock-agent/internal/linespeed"
 	"github.com/violetaini/relaydock-agent/internal/securechan"
 	"github.com/violetaini/relaydock-agent/internal/selfupdate"
@@ -287,6 +288,12 @@ func main() {
 	log.Printf("[Main] Xray servers: %d configured", len(cfg.XrayServers))
 	log.Printf("[Main] Restart method: %s", cfg.RestartMethod)
 
+	stateDir := "."
+	if cfgFile != "" {
+		stateDir = filepath.Dir(cfgFile)
+	}
+	limiter.ConfigurePersistentSnapshotPath(filepath.Join(stateDir, "limiter-state.json"))
+
 	// 创建处理器
 	manageHandler := handler.NewManageHandler(cfg.Token, cfg.RestartMethod, cfg.RestartCommand)
 	manageHandler.SetConfigPath(cfgFile)
@@ -311,10 +318,7 @@ func main() {
 	manageHandler.SetNginxMode(cfg.NginxMode)
 
 	// WARP 服务 — 状态文件 warp.json 跟 config.yaml 同目录(空 cfgFile 时用当前工作目录)
-	warpWorkDir := "."
-	if cfgFile != "" {
-		warpWorkDir = filepath.Dir(cfgFile)
-	}
+	warpWorkDir := stateDir
 	warpService := warp.NewService(warpWorkDir)
 	warpHandler := handler.NewWarpHandler(cfg.Token, warpService, manageHandler)
 	lineSpeedService := linespeed.New(warpWorkDir)

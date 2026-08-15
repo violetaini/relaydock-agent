@@ -4,17 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -171,6 +176,7 @@ type ManageHandler struct {
 	inboundMutationRuntimeConverge    func() error
 	inboundMutationRuntimeApply       func(context.Context, string, map[string]interface{}, bool) error
 	inboundMutationConfigPathResolver func() string
+	inboundClientRuntimeReplace       func(context.Context, string, map[string]interface{}) error
 	inboundFirewallSync               func(context.Context) error
 	agentUninstallV2Supported         func() bool
 	// agentUpgradeReleaseResolver resolves a signed GitHub release before an
@@ -2189,9 +2195,10 @@ func (h *ManageHandler) HandleSystemInfo(w http.ResponseWriter, r *http.Request)
 		"success":       true,
 		"agent_version": version.Version, // 主控用这个对比 GitHub latest tag 决定是否提示升级
 		"capabilities": map[string]bool{
-			constants.CapabilityAgentUninstallV2:    h.supportsAgentUninstallV2(),
-			constants.CapabilityXrayVersionSelectV1: true,
-			constants.CapabilityXrayAuthorizationV2: true,
+			constants.CapabilityAgentUninstallV2:     h.supportsAgentUninstallV2(),
+			constants.CapabilityXrayVersionSelectV1:  true,
+			constants.CapabilityXrayAuthorizationV2:  true,
+			constants.CapabilityWireGuardPeerUsersV1: strings.EqualFold(h.xrayMode, "embedded"),
 		},
 	}
 
@@ -3134,6 +3141,12 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "RelayDock-managed inbounds are suspended while this server is not authorized")
 		return
 	}
+	if action == "add" && strings.EqualFold(h.xrayMode, "embedded") && req.Inbound != nil {
+		if err := requireWireGuardInboundPeerMappings(req.Inbound); err != nil {
+			writeError(w, http.StatusConflict, "wireguard inbound limiter mapping is not durable: "+err.Error())
+			return
+		}
+	}
 	if action == "remove" {
 		if skipRemove, _, err := h.beginInboundMutationLocked(action, &req); err != nil {
 			writeError(w, http.StatusConflict, err.Error())
@@ -3335,6 +3348,17 @@ func (h *ManageHandler) manageInbound(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, message)
 			return
 		}
+		if limiterErr := h.clearRemovedWireGuardLimiterState(req.Tag, original); limiterErr != nil {
+			rollbackErr := h.rollbackExternalInboundMutation(configPath, snapshot, req.Tag, original, clients.Handler)
+			message := fmt.Sprintf("Failed to clear removed WireGuard limiter state: %v", limiterErr)
+			if rollbackErr == nil {
+				message += "; runtime, config, and firewall state restored"
+			} else {
+				message += "; " + rollbackErr.Error()
+			}
+			writeError(w, http.StatusInternalServerError, message)
+			return
+		}
 
 		// 配置成功时，运行态报错可接受（可能尚未加载）
 		if err := h.completeInboundMutationRemovalLocked(req.Tag, req.MutationID); err != nil {
@@ -3518,6 +3542,17 @@ func (h *ManageHandler) manageInboundEmbedded(w http.ResponseWriter, ctx context
 			writeError(w, http.StatusInternalServerError, message)
 			return
 		}
+		if limiterErr := h.clearRemovedWireGuardLimiterState(req.Tag, original); limiterErr != nil {
+			rollbackErr := h.rollbackEmbeddedInboundMutation(configPath, snapshot, req.Tag, original)
+			message := fmt.Sprintf("Failed to clear removed WireGuard limiter state: %v", limiterErr)
+			if rollbackErr == nil {
+				message += "; runtime, config, and firewall state restored"
+			} else {
+				message += "; " + rollbackErr.Error()
+			}
+			writeError(w, http.StatusInternalServerError, message)
+			return
+		}
 
 		if err := h.completeInboundMutationRemovalLocked(req.Tag, req.MutationID); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist inbound mutation fence: %v", err))
@@ -3535,6 +3570,22 @@ func (h *ManageHandler) manageInboundEmbedded(w http.ResponseWriter, ctx context
 	default:
 		writeError(w, http.StatusBadRequest, "Invalid action. Must be 'add' or 'remove'")
 	}
+}
+
+func (h *ManageHandler) clearRemovedWireGuardLimiterState(tag string, original map[string]interface{}) error {
+	protocol, _ := original["protocol"].(string)
+	force := strings.EqualFold(strings.TrimSpace(protocol), "wireguard")
+	var runtime func() (*limiter.Limiter, error)
+	if strings.EqualFold(h.xrayMode, "embedded") && h.embeddedXray != nil {
+		runtime = func() (*limiter.Limiter, error) {
+			runtimeLimiter := h.embeddedXray.GetLimiter()
+			if runtimeLimiter == nil {
+				return nil, errors.New("embedded runtime limiter is unavailable")
+			}
+			return runtimeLimiter, nil
+		}
+	}
+	return limiter.DeleteWireGuardInboundState(tag, force, runtime)
 }
 
 // manageInboundClient 在 inboundsMu 锁内原子地新增/移除一个 client。
@@ -3560,13 +3611,17 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 		return
 	}
 
-	content, err := os.ReadFile(configPath)
+	snapshot, err := captureConfigFile(configPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("read config: %v", err))
 		return
 	}
+	if !snapshot.existed {
+		writeError(w, http.StatusNotFound, "Xray config not found")
+		return
+	}
 	var config map[string]interface{}
-	if err := json.Unmarshal(content, &config); err != nil {
+	if err := json.Unmarshal(snapshot.content, &config); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("parse config: %v", err))
 		return
 	}
@@ -3604,17 +3659,57 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 		arrKey = "users"
 	case "socks", "http":
 		arrKey = "accounts"
+	case "wireguard":
+		arrKey = "peers"
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported protocol: %s", protocol))
 		return
+	}
+	isWireGuard := strings.EqualFold(protocol, "wireguard")
+	clientForConfig := req.Client
+	var originalInbound map[string]interface{}
+	if isWireGuard {
+		if !strings.EqualFold(h.xrayMode, "embedded") {
+			writeError(w, http.StatusConflict, "wireguard peer users require embedded Xray mode")
+			return
+		}
+		originalInbound, err = inboundFromSnapshot(snapshot, req.Tag)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		peer, err := wireGuardServerPeerFromClient(req.Client)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if action == "add-client" {
+			allowedIPs := peer["allowedIPs"].([]string)
+			if err := limiter.RequireWireGuardPeerMappings(req.Tag, allowedIPs); err != nil {
+				writeError(w, http.StatusConflict, "wireguard peer limiter mapping is not durable: "+err.Error())
+				return
+			}
+		}
+		clientForConfig = peer
 	}
 	arr, _ := settings[arrKey].([]interface{})
 	respondClientNoOp := func(message string) {
 		// A prior request may have persisted this exact client change while the
 		// live HandlerService was unavailable. Reapply the durable inbound on a
 		// later idempotent request, but never start or restart Xray to do so.
-		if runtimeErr := h.replaceRuntimeInbound(ctx, req.Tag, target); runtimeErr != nil {
+		if runtimeErr := h.replaceInboundClientRuntime(ctx, req.Tag, target); runtimeErr != nil {
 			log.Printf("[Manage] manageInboundClient: no-op runtime reconcile deferred (tag=%s): %v", req.Tag, runtimeErr)
+			if isWireGuard {
+				rollbackErr := h.rollbackWireGuardClientMutation(configPath, snapshot, req.Tag, originalInbound)
+				message := fmt.Sprintf("wireguard peer runtime apply failed: %v", runtimeErr)
+				if rollbackErr == nil {
+					message += "; prior config and runtime restored"
+				} else {
+					message += "; " + rollbackErr.Error()
+				}
+				writeError(w, http.StatusInternalServerError, message)
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"success":         true,
 				"message":         message + "; runtime apply deferred",
@@ -3633,17 +3728,17 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 		// 幂等:配置无须重写，但仍可尝试把已持久化的定义热同步到
 		// 已运行的 Xray。失败只返回 deferred，不改变核心生命周期。
 		for _, c := range arr {
-			if m, ok := c.(map[string]interface{}); ok && matchClientCredential(m, req.Client, protocol) {
+			if m, ok := c.(map[string]interface{}); ok && matchClientCredential(m, clientForConfig, protocol) {
 				respondClientNoOp("client already present (no-op)")
 				return
 			}
 		}
-		arr = append(arr, req.Client)
+		arr = append(arr, clientForConfig)
 	case "remove-client":
 		filtered := arr[:0:0]
 		removed := 0
 		for _, c := range arr {
-			if m, ok := c.(map[string]interface{}); ok && matchClientCredential(m, req.Client, protocol) {
+			if m, ok := c.(map[string]interface{}); ok && matchClientCredential(m, clientForConfig, protocol) {
 				removed++
 				continue
 			}
@@ -3689,7 +3784,18 @@ func (h *ManageHandler) manageInboundClient(w http.ResponseWriter, ctx context.C
 
 	// 运行时应用:remove 旧 inbound + add 新 inbound。在 inboundsMu 内顺序执行,
 	// 不会和别的 add/remove 交错。失败也只警告 — 配置文件已经是新版,xray 下次重启就生效。
-	if err := h.replaceRuntimeInbound(ctx, req.Tag, target); err != nil {
+	if err := h.replaceInboundClientRuntime(ctx, req.Tag, target); err != nil {
+		if isWireGuard {
+			rollbackErr := h.rollbackWireGuardClientMutation(configPath, snapshot, req.Tag, originalInbound)
+			message := fmt.Sprintf("wireguard peer runtime apply failed: %v", err)
+			if rollbackErr == nil {
+				message += "; prior config and runtime restored"
+			} else {
+				message += "; " + rollbackErr.Error()
+			}
+			writeError(w, http.StatusInternalServerError, message)
+			return
+		}
 		log.Printf("[Manage] manageInboundClient: runtime apply failed (tag=%s): %v; config file already updated", req.Tag, err)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success":         true,
@@ -3886,6 +3992,41 @@ func (h *ManageHandler) replaceRuntimeInbound(ctx context.Context, tag string, n
 	return h.addInbound(ctx, clients.Handler, newInbound)
 }
 
+func (h *ManageHandler) replaceInboundClientRuntime(ctx context.Context, tag string, inbound map[string]interface{}) error {
+	if h.inboundClientRuntimeReplace != nil {
+		return h.inboundClientRuntimeReplace(ctx, tag, inbound)
+	}
+	return h.replaceRuntimeInbound(ctx, tag, inbound)
+}
+
+func (h *ManageHandler) rollbackWireGuardClientMutation(
+	configPath string,
+	snapshot configFileSnapshot,
+	tag string,
+	original map[string]interface{},
+) error {
+	var failures []string
+	if err := restoreConfigFile(configPath, snapshot); err != nil {
+		failures = append(failures, "config rollback failed: "+err.Error())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var runtimeErr error
+	if original != nil {
+		runtimeErr = h.replaceInboundClientRuntime(ctx, tag, original)
+	} else {
+		runtimeErr = h.removeRuntimeInboundForRecovery(ctx, tag)
+	}
+	if runtimeErr != nil && !isMissingInboundError(runtimeErr) {
+		failures = append(failures, "runtime rollback failed: "+runtimeErr.Error())
+	}
+	if len(failures) != 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
 // removeRuntimeInboundForRecovery removes the durable absence of an inbound
 // from the live runtime. Only an explicit not-found is an idempotent success;
 // transport and timeout failures leave the mutation pending and fail closed.
@@ -3942,6 +4083,8 @@ func matchClientCredential(a, b map[string]interface{}, protocol string) bool {
 		primaryKey = "auth"
 	case "socks", "http":
 		primaryKey = "user"
+	case "wireguard":
+		return bothNonEmptyEq("publicKey")
 	}
 	// 双方都带 primary key(完整凭据) → 只看 primary key,**不** fallback email。
 	// 同一 inbound 上多 client 共享 email 是合法场景(per-user 套餐绑定多客户端),
@@ -3953,6 +4096,157 @@ func matchClientCredential(a, b map[string]interface{}, protocol string) bool {
 	// 任一方缺 primary key — 典型是主控 removeClientFromInbound 只传 {email: ...}
 	// 这种"按 email 删 client"路径需要保留,降级用 email 匹配。
 	return bothNonEmptyEq("email")
+}
+
+func wireGuardServerPeerFromClient(client map[string]interface{}) (map[string]interface{}, error) {
+	publicKey, ok := client["publicKey"].(string)
+	publicKey = strings.TrimSpace(publicKey)
+	if !ok || !validWireGuardPeerKey(publicKey) {
+		return nil, fmt.Errorf("wireguard peer publicKey must be a 32-byte hexadecimal or base64 key")
+	}
+	allowedIPs, err := canonicalWireGuardPeerAllowedIPs(client["allowedIPs"])
+	if err != nil {
+		return nil, err
+	}
+	peer := map[string]interface{}{
+		"publicKey":  publicKey,
+		"allowedIPs": allowedIPs,
+	}
+	if rawPreSharedKey, exists := client["preSharedKey"]; exists {
+		preSharedKey, stringValue := rawPreSharedKey.(string)
+		preSharedKey = strings.TrimSpace(preSharedKey)
+		if !stringValue || !validWireGuardPeerKey(preSharedKey) {
+			return nil, fmt.Errorf("wireguard peer preSharedKey must be a 32-byte hexadecimal or base64 key")
+		}
+		peer["preSharedKey"] = preSharedKey
+	}
+	if rawKeepAlive, exists := client["keepAlive"]; exists {
+		keepAlive, err := canonicalWireGuardPeerKeepAlive(rawKeepAlive)
+		if err != nil {
+			return nil, err
+		}
+		peer["keepAlive"] = keepAlive
+	}
+	return peer, nil
+}
+
+func requireWireGuardInboundPeerMappings(inbound map[string]interface{}) error {
+	protocol, _ := inbound["protocol"].(string)
+	if !strings.EqualFold(strings.TrimSpace(protocol), "wireguard") {
+		return nil
+	}
+	tag, _ := inbound["tag"].(string)
+	tag = strings.TrimSpace(tag)
+	settings, _ := inbound["settings"].(map[string]interface{})
+	if settings == nil {
+		return errors.New("wireguard inbound settings are required")
+	}
+	peers, _ := settings["peers"].([]interface{})
+	if len(peers) == 0 {
+		return nil
+	}
+	allowedIPs := make([]string, 0, len(peers))
+	for _, item := range peers {
+		peer, ok := item.(map[string]interface{})
+		if !ok {
+			return errors.New("wireguard inbound peers must be objects")
+		}
+		sanitized, err := wireGuardServerPeerFromClient(peer)
+		if err != nil {
+			return err
+		}
+		allowedIPs = append(allowedIPs, sanitized["allowedIPs"].([]string)...)
+	}
+	return limiter.RequireWireGuardPeerMappings(tag, allowedIPs)
+}
+
+func validWireGuardPeerKey(value string) bool {
+	if strings.IndexAny(value, " \t\r\n") >= 0 {
+		return false
+	}
+	if len(value) == 64 {
+		decoded, err := hex.DecodeString(value)
+		return err == nil && len(decoded) == 32
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding.Strict(),
+		base64.RawStdEncoding.Strict(),
+		base64.URLEncoding.Strict(),
+		base64.RawURLEncoding.Strict(),
+	} {
+		decoded, err := encoding.DecodeString(value)
+		if err == nil && len(decoded) == 32 {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalWireGuardPeerAllowedIPs(value interface{}) ([]string, error) {
+	var raw []interface{}
+	switch values := value.(type) {
+	case []interface{}:
+		raw = values
+	case []string:
+		raw = make([]interface{}, len(values))
+		for i := range values {
+			raw[i] = values[i]
+		}
+	default:
+		return nil, fmt.Errorf("wireguard peer allowedIPs must be a non-empty array of host prefixes")
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("wireguard peer allowedIPs must be a non-empty array of host prefixes")
+	}
+
+	result := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		value, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("wireguard peer allowedIPs entries must be strings")
+		}
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil || !prefix.IsValid() || prefix.Bits() != prefix.Addr().BitLen() {
+			return nil, fmt.Errorf("wireguard peer allowedIP %q must be an IPv4 /32 or IPv6 /128 host prefix", value)
+		}
+		canonical := prefix.String()
+		if _, duplicate := seen[canonical]; duplicate {
+			return nil, fmt.Errorf("wireguard peer allowedIP %q is duplicated", canonical)
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, canonical)
+	}
+	return result, nil
+}
+
+func canonicalWireGuardPeerKeepAlive(value interface{}) (uint32, error) {
+	number := reflect.ValueOf(value)
+	if !number.IsValid() {
+		return 0, fmt.Errorf("wireguard peer keepAlive must be an integer between 0 and 65535")
+	}
+	var integer uint64
+	switch number.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if number.Int() < 0 {
+			return 0, fmt.Errorf("wireguard peer keepAlive must be an integer between 0 and 65535")
+		}
+		integer = uint64(number.Int())
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		integer = number.Uint()
+	case reflect.Float32, reflect.Float64:
+		floating := number.Float()
+		if floating < 0 || floating > 65535 || math.Trunc(floating) != floating {
+			return 0, fmt.Errorf("wireguard peer keepAlive must be an integer between 0 and 65535")
+		}
+		integer = uint64(floating)
+	default:
+		return 0, fmt.Errorf("wireguard peer keepAlive must be an integer between 0 and 65535")
+	}
+	if integer > 65535 {
+		return 0, fmt.Errorf("wireguard peer keepAlive must be an integer between 0 and 65535")
+	}
+	return uint32(integer), nil
 }
 
 // ================== Xray 出站管理 ==================
@@ -4688,6 +4982,18 @@ type BatchApplyResult struct {
 	Message         string   `json:"message,omitempty"`
 }
 
+func inboundProtocolByTag(config map[string]interface{}, tag string) (string, bool) {
+	inbounds, _ := config["inbounds"].([]interface{})
+	for _, raw := range inbounds {
+		inbound, _ := raw.(map[string]interface{})
+		if inboundTag, _ := inbound["tag"].(string); inboundTag == tag {
+			protocol, _ := inbound["protocol"].(string)
+			return protocol, true
+		}
+	}
+	return "", false
+}
+
 // applyAddClientToConfig 在内存中的 xray config 上加 client(幂等),不写盘。
 // 返回该 inbound 的 map(供 caller 后续 replaceRuntimeInbound 用),已存在或未变也返回该 map。
 func applyAddClientToConfig(config map[string]interface{}, tag string, client map[string]interface{}) (map[string]interface{}, bool, error) {
@@ -4714,17 +5020,27 @@ func applyAddClientToConfig(config map[string]interface{}, tag string, client ma
 			arrKey = "users"
 		case "socks", "http":
 			arrKey = "accounts"
+		case "wireguard":
+			arrKey = "peers"
 		default:
 			return nil, false, fmt.Errorf("unsupported protocol: %s", protocol)
+		}
+		clientForConfig := client
+		if strings.EqualFold(protocol, "wireguard") {
+			peer, err := wireGuardServerPeerFromClient(client)
+			if err != nil {
+				return nil, false, err
+			}
+			clientForConfig = peer
 		}
 		arr, _ := settings[arrKey].([]interface{})
 		// 幂等
 		for _, c := range arr {
-			if cm, ok := c.(map[string]interface{}); ok && matchClientCredential(cm, client, protocol) {
+			if cm, ok := c.(map[string]interface{}); ok && matchClientCredential(cm, clientForConfig, protocol) {
 				return m, false, nil // 已存在,inbound 未变
 			}
 		}
-		arr = append(arr, client)
+		arr = append(arr, clientForConfig)
 		settings[arrKey] = arr
 		return m, true, nil
 	}
@@ -4786,6 +5102,7 @@ func applyAddUserToRouteInConfig(config map[string]interface{}, marktag, outboun
 
 // HandleBatchApply 一次性提交多个 inbound 加 client + routing rule 加 user。
 // 在 inboundsMu 锁内单次读 config → 内存修改 → 单次写盘 → per-inbound runtime apply。
+// WireGuard client 变更必须使用单条 inbounds 接口,由该路径提供配置与 runtime 原子回滚。
 // 用于套餐绑用户:同台 server 上多个 routed 节点的所有改动合并成 1 次 round-trip。
 func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request) {
 	if !h.authenticate(r) {
@@ -4828,6 +5145,13 @@ func (h *ManageHandler) HandleBatchApply(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("parse config: %v", err))
 		return
 	}
+	for _, item := range req.InboundClients {
+		if protocol, found := inboundProtocolByTag(config, item.Tag); found && strings.EqualFold(protocol, "wireguard") {
+			writeError(w, http.StatusConflict, "WireGuard client mutations are not supported by batch apply; use "+constants.PathChildInbounds)
+			return
+		}
+	}
+
 	originalRouting := map[string]interface{}{}
 	if current, ok := config["routing"].(map[string]interface{}); ok {
 		if raw, marshalErr := json.Marshal(current); marshalErr == nil {
@@ -6942,7 +7266,7 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	if h.embeddedXray == nil {
+	if !strings.EqualFold(h.xrayMode, "embedded") || h.embeddedXray == nil {
 		writeError(w, http.StatusBadRequest, "Not in embedded mode")
 		return
 	}
@@ -6955,7 +7279,12 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 			Email       string `json:"email"`
 			SpeedLimit  uint64 `json:"speed_limit"`
 			DeviceLimit int    `json:"device_limit"`
+			ConnGroup   string `json:"conn_group,omitempty"`
 		} `json:"users"`
+		WireGuardPeers []struct {
+			Address string `json:"address"`
+			Email   string `json:"email"`
+		} `json:"wireguard_peers,omitempty"`
 		AutoSpeedRules []embedded.AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -6970,21 +7299,39 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 			Email:       u.Email,
 			SpeedLimit:  u.SpeedLimit,
 			DeviceLimit: u.DeviceLimit,
+			ConnGroup:   u.ConnGroup,
 		}
 	}
-
-	l := h.embeddedXray.GetLimiter()
-	if l == nil {
-		writeError(w, http.StatusInternalServerError, "Limiter not available")
+	wgPeers := make([]limiter.WireGuardPeerUser, len(req.WireGuardPeers))
+	for i, p := range req.WireGuardPeers {
+		wgPeers[i] = limiter.WireGuardPeerUser{
+			Address: p.Address,
+			Email:   p.Email,
+		}
+	}
+	snapshot := limiter.PersistentInboundSnapshot{
+		InboundTag:     req.InboundTag,
+		NodeLimit:      req.NodeLimit,
+		Users:          users,
+		WireGuardPeers: wgPeers,
+	}
+	var runtimeLimiter *limiter.Limiter
+	if err := limiter.PersistAndApplyInboundSnapshot(snapshot, func() error {
+		runtimeLimiter = h.embeddedXray.GetLimiter()
+		if runtimeLimiter == nil {
+			return errors.New("limiter not available")
+		}
+		runtimeLimiter.SyncInboundLimiter(req.InboundTag, req.NodeLimit, users, wgPeers...)
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Persist limiter state: %v", err))
 		return
 	}
-
-	l.AddInboundLimiter(req.InboundTag, req.NodeLimit, users)
 
 	if len(req.AutoSpeedRules) > 0 {
 		if monitor := h.embeddedXray.GetSpeedMonitor(); monitor != nil {
 			monitor.UpdateRules(req.AutoSpeedRules)
-			monitor.SetLimiter(l)
+			monitor.SetLimiter(runtimeLimiter)
 		}
 	}
 

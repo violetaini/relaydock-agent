@@ -99,6 +99,54 @@ type Dispatcher struct {
 	Limiter *limiter.Limiter
 }
 
+func inboundSourceHostIP(sessionInbound *session.Inbound) string {
+	if sessionInbound == nil {
+		return ""
+	}
+	if ip := sessionInbound.Source.Address.IP(); len(ip) > 0 {
+		return ip.String()
+	}
+	return sessionInbound.Source.Address.String()
+}
+
+func (d *Dispatcher) resolveInboundUser(sessionInbound *session.Inbound) (*protocol.MemoryUser, error) {
+	if sessionInbound == nil {
+		return nil, nil
+	}
+	if d.Limiter == nil {
+		return sessionInbound.User, nil
+	}
+	sourceIP := inboundSourceHostIP(sessionInbound)
+	email, mapped := d.Limiter.ResolveWireGuardPeerUser(sessionInbound.Tag, sourceIP)
+	if d.Limiter.HasWireGuardPeerMappings(sessionInbound.Tag) {
+		if !mapped || email == "" {
+			return nil, errors.New("unmapped WireGuard source ", sourceIP, " for inbound ", sessionInbound.Tag)
+		}
+		if sessionInbound.User != nil && sessionInbound.User.Email != "" {
+			if sessionInbound.User.Email != email {
+				return nil, errors.New("WireGuard source identity mismatch for inbound ", sessionInbound.Tag)
+			}
+			return sessionInbound.User, nil
+		}
+		user := &protocol.MemoryUser{Email: email}
+		sessionInbound.User = user
+		return user, nil
+	}
+	return sessionInbound.User, nil
+}
+
+func interruptAndCloseLink(link *transport.Link) {
+	if link == nil {
+		return
+	}
+	if link.Reader != nil {
+		_ = common.Interrupt(link.Reader)
+	}
+	if link.Writer != nil {
+		_ = common.Close(link.Writer)
+	}
+}
+
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		d := &Dispatcher{}
@@ -141,10 +189,16 @@ func (d *Dispatcher) getLink(ctx context.Context) (*transport.Link, *transport.L
 	var user *protocol.MemoryUser
 	if sessionInbound != nil {
 		sessionInbound.CanSpliceCopy = 3
-		user = sessionInbound.User
+		var err error
+		user, err = d.resolveInboundUser(sessionInbound)
+		if err != nil {
+			interruptAndCloseLink(inboundLink)
+			interruptAndCloseLink(outboundLink)
+			return nil, nil, err
+		}
 	}
 
-	if user != nil && len(user.Email) > 0 {
+	if user != nil && len(user.Email) > 0 && d.Limiter != nil {
 		// 连接数限制:按 group 精确并发计数、满额拒绝。在建出站前断流(零出站占用);
 		// 放行则注册 ctx 结束时 ReleaseConn 精确 -1。group="" 表示不限/不计数,无需释放。
 		if ok, group := d.Limiter.AcquireConn(sessionInbound.Tag, user.Email); !ok {
@@ -161,7 +215,7 @@ func (d *Dispatcher) getLink(ctx context.Context) (*transport.Link, *transport.L
 		bucket, hasLimit, _ := d.Limiter.GetUserBucket(
 			sessionInbound.Tag,
 			user.Email,
-			sessionInbound.Source.Address.IP().String(),
+			inboundSourceHostIP(sessionInbound),
 		)
 		if hasLimit {
 			inboundLink.Writer = d.Limiter.RateWriter(inboundLink.Writer, bucket)
@@ -305,16 +359,27 @@ func (d *Dispatcher) DispatchLink(ctx context.Context, destination net.Destinati
 	}
 	si := session.InboundFromContext(ctx)
 	if si != nil {
+		user, err := d.resolveInboundUser(si)
+		if err != nil {
+			interruptAndCloseLink(outbound)
+			return err
+		}
 		// 连接数限制:DispatchLink 是 VLESS 等的真实数据路径(不经 getLink),必须在这里也做满额拒绝,
 		// 否则限制形同虚设(历史 device_limit 同样只挂在 getLink,对 DispatchLink 路径无效)。
-		if si.User != nil && len(si.User.Email) > 0 {
-			if ok, group := d.Limiter.AcquireConn(si.Tag, si.User.Email); !ok {
-				errors.LogWarning(ctx, "connection limit reached: ", si.User.Email)
+		if user != nil && len(user.Email) > 0 && d.Limiter != nil {
+			if ok, group := d.Limiter.AcquireConn(si.Tag, user.Email); !ok {
+				errors.LogWarning(ctx, "connection limit reached: ", user.Email)
 				common.Interrupt(outbound.Reader)
 				common.Close(outbound.Writer)
-				return errors.New("connection limit reached: ", si.User.Email)
+				return errors.New("connection limit reached: ", user.Email)
 			} else if group != "" {
 				context.AfterFunc(ctx, func() { d.Limiter.ReleaseConn(group) })
+			}
+			if d.Limiter.HasWireGuardPeerMappings(si.Tag) {
+				if bucket, hasLimit, _ := d.Limiter.GetUserBucket(si.Tag, user.Email, inboundSourceHostIP(si)); hasLimit {
+					outbound.Reader = d.Limiter.RateReader(outbound.Reader, bucket)
+					outbound.Writer = d.Limiter.RateWriter(outbound.Writer, bucket)
+				}
 			}
 		}
 	}

@@ -121,26 +121,40 @@ func TestSSEStreamCommandFailureDoesNotEmitCompletion(t *testing.T) {
 }
 
 func TestSystemInfoAdvertisesXrayVersionSelection(t *testing.T) {
-	handler := NewManageHandler("", "", "")
-	request := httptest.NewRequest(http.MethodGet, constants.PathChildSystemInfo, nil)
-	request.Header.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
-	response := httptest.NewRecorder()
+	for _, test := range []struct {
+		mode          string
+		wantWireGuard bool
+	}{
+		{mode: "embedded", wantWireGuard: true},
+		{mode: "external", wantWireGuard: false},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			handler := NewManageHandler("", "", "")
+			handler.SetXrayMode(test.mode)
+			request := httptest.NewRequest(http.MethodGet, constants.PathChildSystemInfo, nil)
+			request.Header.Set(constants.HeaderUserAgent, constants.AgentUserAgent)
+			response := httptest.NewRecorder()
 
-	handler.HandleSystemInfo(response, request)
+			handler.HandleSystemInfo(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	var payload struct {
-		Capabilities map[string]bool `json:"capabilities"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if !payload.Capabilities[constants.CapabilityXrayVersionSelectV1] {
-		t.Fatalf("capabilities=%v", payload.Capabilities)
-	}
-	if !payload.Capabilities[constants.CapabilityXrayAuthorizationV2] {
-		t.Fatalf("runtime authorization capability missing: %v", payload.Capabilities)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			var payload struct {
+				Capabilities map[string]bool `json:"capabilities"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if !payload.Capabilities[constants.CapabilityXrayVersionSelectV1] {
+				t.Fatalf("capabilities=%v", payload.Capabilities)
+			}
+			if !payload.Capabilities[constants.CapabilityXrayAuthorizationV2] {
+				t.Fatalf("runtime authorization capability missing: %v", payload.Capabilities)
+			}
+			if actual := payload.Capabilities[constants.CapabilityWireGuardPeerUsersV1]; actual != test.wantWireGuard {
+				t.Fatalf("wireguard capability=%v want %v; capabilities=%v", actual, test.wantWireGuard, payload.Capabilities)
+			}
+		})
 	}
 }

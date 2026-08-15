@@ -63,3 +63,7 @@ sign-local.sh
 !internal/version/compare_test.go
 !internal/xrpc/services/handler/outbound_test.go
 !internal/embedded/config_policy_test.go
+!internal/dispatcher/default_test.go
+!internal/handler/wireguard_management_test.go
+!internal/limiter/persistent_test.go
+!internal/limiter/wireguard_test.go

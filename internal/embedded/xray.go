@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -87,30 +88,68 @@ func (e *EmbeddedXray) Start() (retErr error) {
 			retErr = fmt.Errorf("xray start panicked: %v", r)
 		}
 	}()
-	pbConfig, err := buildCoreConfigWithSuppressedInbounds(e.configPath, e.suppressedInboundTagsSnapshot())
+	configuredSuppressed := e.suppressedInboundTagsSnapshot()
+	var instance *core.Instance
+	var runtimeDispatcher *mydispatcher.Dispatcher
+	err := limiter.WithPersistentInboundSnapshots(func(snapshots []limiter.PersistentInboundSnapshot) error {
+		data, err := os.ReadFile(e.configPath)
+		if err != nil {
+			return err
+		}
+		missingMappings, err := wireGuardInboundTagsMissingPersistentMappings(data, snapshots)
+		if err != nil {
+			return err
+		}
+		suppressed := configuredSuppressed
+		if len(missingMappings) > 0 && suppressed == nil {
+			suppressed = make(map[string]struct{}, len(missingMappings))
+		}
+		for tag := range missingMappings {
+			suppressed[tag] = struct{}{}
+			log.Printf("[EmbeddedXray] Suppressing WireGuard inbound %q: durable limiter mapping is incomplete", tag)
+		}
+
+		pbConfig, err := buildCoreConfigJSONWithSuppressedInbounds(data, suppressed)
+		if err != nil {
+			return err
+		}
+		instance, err = e.safeNewInstance(pbConfig)
+		if err != nil {
+			return err
+		}
+		if feature := instance.GetFeature(mydispatcher.Type()); feature != nil {
+			runtimeDispatcher, _ = feature.(*mydispatcher.Dispatcher)
+		}
+		if len(snapshots) > 0 && (runtimeDispatcher == nil || runtimeDispatcher.Limiter == nil) {
+			_ = instance.Close()
+			return fmt.Errorf("persistent limiter state is present but the embedded dispatcher is unavailable")
+		}
+		for _, snapshot := range snapshots {
+			runtimeDispatcher.Limiter.SyncInboundLimiter(
+				snapshot.InboundTag,
+				snapshot.NodeLimit,
+				snapshot.Users,
+				snapshot.WireGuardPeers...,
+			)
+		}
+		if err := e.safeInstanceStart(instance); err != nil {
+			_ = instance.Close()
+			return err
+		}
+		e.mu.Lock()
+		e.instance = instance
+		e.statsManager, _ = instance.GetFeature(stats.ManagerType()).(stats.Manager)
+		e.dispatcher = runtimeDispatcher
+		e.mu.Unlock()
+		return nil
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("start embedded Xray with durable limiter state: %w", err)
 	}
 
-	instance, err := e.safeNewInstance(pbConfig)
-	if err != nil {
-		return err
+	if e.speedMonitor != nil && runtimeDispatcher != nil {
+		e.speedMonitor.SetLimiter(runtimeDispatcher.Limiter)
 	}
-
-	if err := e.safeInstanceStart(instance); err != nil {
-		instance.Close()
-		return err
-	}
-
-	e.mu.Lock()
-	e.instance = instance
-	e.statsManager, _ = instance.GetFeature(stats.ManagerType()).(stats.Manager)
-
-	// Get our custom dispatcher for limiter access
-	if d := instance.GetFeature(mydispatcher.Type()); d != nil {
-		e.dispatcher, _ = d.(*mydispatcher.Dispatcher)
-	}
-	e.mu.Unlock()
 
 	log.Printf("[EmbeddedXray] Started successfully")
 	return nil
@@ -142,17 +181,19 @@ func (e *EmbeddedXray) Stop() (retErr error) {
 			retErr = fmt.Errorf("xray stop panicked: %v", r)
 		}
 	}()
-	e.mu.Lock()
-	instance := e.instance
-	e.instance = nil
-	e.dispatcher = nil
-	e.statsManager = nil
-	e.mu.Unlock()
+	return limiter.WithPersistentStateLock(func() error {
+		e.mu.Lock()
+		instance := e.instance
+		e.instance = nil
+		e.dispatcher = nil
+		e.statsManager = nil
+		e.mu.Unlock()
 
-	if instance != nil {
-		return instance.Close()
-	}
-	return nil
+		if instance != nil {
+			return instance.Close()
+		}
+		return nil
+	})
 }
 
 func (e *EmbeddedXray) Restart() error {

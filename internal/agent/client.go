@@ -662,7 +662,11 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 		"same_host_as_master": c.sameHostAsMaster(), // 主控同机 → 前端可显示「反代主控」入口
 		"agent_version":       version.Version,      // 主控经 WS auth 直接拿版本,不再反向 HTTP 拉 /api/child/system/info(端口隐身后仍可显示)
 		"xray_mode":           c.config.XrayMode,    // 上报当前运行模式,主控据此校正 embedded→external 漂移
-		"capabilities":        advertisedCapabilities(rpcAvailable, util.SupportsAgentUninstallV2()),
+		"capabilities": advertisedCapabilities(
+			rpcAvailable,
+			util.SupportsAgentUninstallV2(),
+			strings.EqualFold(c.config.XrayMode, "embedded"),
+		),
 	})
 
 	msg := map[string]interface{}{
@@ -700,13 +704,14 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 	return nil
 }
 
-func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported bool) map[string]bool {
+func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported, wireGuardPeerUsersSupported bool) map[string]bool {
 	return map[string]bool{
-		"rpc":                                   rpcAvailable,
-		"stream":                                rpcAvailable,
-		constants.CapabilityAgentUninstallV2:    agentUninstallV2Supported,
-		constants.CapabilityXrayVersionSelectV1: true,
-		constants.CapabilityXrayAuthorizationV2: true,
+		"rpc":                                    rpcAvailable,
+		"stream":                                 rpcAvailable,
+		constants.CapabilityAgentUninstallV2:     agentUninstallV2Supported,
+		constants.CapabilityXrayVersionSelectV1:  true,
+		constants.CapabilityXrayAuthorizationV2:  true,
+		constants.CapabilityWireGuardPeerUsersV1: wireGuardPeerUsersSupported,
 	}
 }
 
@@ -891,8 +896,12 @@ func (c *Client) sendTrafficData(conn *websocket.Conn) error {
 	c.lastLimitEvalTime = now
 
 	payloadMap := map[string]interface{}{
-		"stats":        stats,
-		"capabilities": advertisedCapabilities(c.rpcMux != nil, util.SupportsAgentUninstallV2()),
+		"stats": stats,
+		"capabilities": advertisedCapabilities(
+			c.rpcMux != nil,
+			util.SupportsAgentUninstallV2(),
+			strings.EqualFold(c.config.XrayMode, "embedded"),
+		),
 	}
 
 	// 系统级网卡累计 RX/TX —— 主控按 server.traffic_source='system' 时改用这两个值替代 xray 流量,
@@ -1389,7 +1398,11 @@ func (c *Client) sendTrafficHTTP(ctx context.Context) error {
 		// HTTP/pull mode has no active WS RPC channel, but it must still declare
 		// panel-managed inbound authorization support so the master can safely send
 		// xray_authorized to this fixed Agent generation.
-		"capabilities": advertisedCapabilities(false, util.SupportsAgentUninstallV2()),
+		"capabilities": advertisedCapabilities(
+			false,
+			util.SupportsAgentUninstallV2(),
+			strings.EqualFold(c.config.XrayMode, "embedded"),
+		),
 		"system": map[string]int64{
 			"rx_total":       sysRx,
 			"tx_total":       sysTx,
@@ -1920,6 +1933,7 @@ type WSLimiterConfigPayload struct {
 	InboundTag     string                        `json:"inbound_tag"`
 	NodeLimit      uint64                        `json:"node_limit"`
 	Users          []WSUserLimitInfo             `json:"users"`
+	WireGuardPeers []WSWireGuardPeerUser         `json:"wireguard_peers,omitempty"`
 	AutoSpeedRules []embedded.AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 }
 
@@ -1931,6 +1945,11 @@ type WSUserLimitInfo struct {
 	SpeedLimit  uint64 `json:"speed_limit"`
 	DeviceLimit int    `json:"device_limit"`
 	ConnGroup   string `json:"conn_group,omitempty"` // "<user>|<物理父节点ID>";空=退化按 email 计数(老主控兼容)
+}
+
+type WSWireGuardPeerUser struct {
+	Address string `json:"address"`
+	Email   string `json:"email"`
 }
 
 // LicenseStatus 表示主控端下发的许可证状态。
@@ -2147,7 +2166,7 @@ func (c *Client) HasProFeature(name string) bool {
 }
 
 func (c *Client) handleLimiterConfig(payload WSLimiterConfigPayload) {
-	if c.embeddedXray == nil {
+	if !strings.EqualFold(c.config.XrayMode, "embedded") {
 		log.Printf("[Agent] Ignoring limiter_config: not in embedded mode")
 		return
 	}
@@ -2166,18 +2185,42 @@ func (c *Client) handleLimiterConfig(payload WSLimiterConfigPayload) {
 			ConnGroup:   u.ConnGroup,
 		}
 	}
-
-	l := c.embeddedXray.GetLimiter()
-	if l == nil {
+	wgPeers := make([]limiter.WireGuardPeerUser, len(payload.WireGuardPeers))
+	for i, p := range payload.WireGuardPeers {
+		wgPeers[i] = limiter.WireGuardPeerUser{
+			Address: p.Address,
+			Email:   p.Email,
+		}
+	}
+	snapshot := limiter.PersistentInboundSnapshot{
+		InboundTag:     payload.InboundTag,
+		NodeLimit:      payload.NodeLimit,
+		Users:          users,
+		WireGuardPeers: wgPeers,
+	}
+	var runtimeLimiter *limiter.Limiter
+	var apply func() error
+	if c.embeddedXray != nil {
+		apply = func() error {
+			runtimeLimiter = c.embeddedXray.GetLimiter()
+			if runtimeLimiter == nil {
+				return fmt.Errorf("embedded limiter is not available")
+			}
+			runtimeLimiter.SyncInboundLimiter(payload.InboundTag, payload.NodeLimit, users, wgPeers...)
+			return nil
+		}
+	}
+	if err := limiter.PersistAndApplyInboundSnapshot(snapshot, apply); err != nil {
+		log.Printf("[Agent] Refusing limiter_config with non-durable state: %v", err)
+		return
+	}
+	if runtimeLimiter == nil {
+		log.Printf("[Agent] Limiter state persisted for the next embedded Xray start")
 		return
 	}
 
-	// 用 Sync 而非 Add:Add 会重建 BucketHub,存量连接持有的旧桶不会被更新,
-	// 改限速对已连上的用户不生效(要等他重连)。见 SyncInboundLimiter 的说明。
-	l.SyncInboundLimiter(payload.InboundTag, payload.NodeLimit, users)
-
 	if monitor := c.embeddedXray.GetSpeedMonitor(); monitor != nil {
-		monitor.SetLimiter(l)
+		monitor.SetLimiter(runtimeLimiter)
 		if len(payload.AutoSpeedRules) > 0 {
 			monitor.UpdateRules(payload.AutoSpeedRules)
 			log.Printf("[Agent] Updated auto speed rules: %d rules", len(payload.AutoSpeedRules))

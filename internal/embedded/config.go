@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/xtls/xray-core/app/policy"
 
 	mydispatcher "github.com/violetaini/relaydock-agent/internal/dispatcher"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
 )
 
 // ValidateConfigProtocols enforces protocols intentionally disabled by the
@@ -108,7 +110,11 @@ func buildCoreConfigWithSuppressedInbounds(configPath string, suppressed map[str
 	if err != nil {
 		return nil, err
 	}
-	data, err = suppressConfiguredInbounds(data, suppressed)
+	return buildCoreConfigJSONWithSuppressedInbounds(data, suppressed)
+}
+
+func buildCoreConfigJSONWithSuppressedInbounds(data []byte, suppressed map[string]struct{}) (*core.Config, error) {
+	data, err := suppressConfiguredInbounds(data, suppressed)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +175,85 @@ func buildCoreConfigWithSuppressedInbounds(configPath string, suppressed map[str
 	pbConfig.App = append(customApps, filtered...)
 
 	return pbConfig, nil
+}
+
+// wireGuardInboundTagsMissingPersistentMappings finds WireGuard listeners that
+// cannot be started with a complete source-to-user identity map. The caller
+// suppresses these tags from its in-memory startup config while preserving the
+// durable Xray file for later recovery.
+func wireGuardInboundTagsMissingPersistentMappings(
+	data []byte,
+	snapshots []limiter.PersistentInboundSnapshot,
+) (map[string]struct{}, error) {
+	var config struct {
+		Inbounds []struct {
+			Tag      string `json:"tag"`
+			Protocol string `json:"protocol"`
+			Settings struct {
+				Peers []struct {
+					AllowedIPs []string `json:"allowedIPs"`
+				} `json:"peers"`
+			} `json:"settings"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parse config before WireGuard limiter validation: %w", err)
+	}
+
+	mappedByTag := make(map[string]map[string]struct{}, len(snapshots))
+	for _, snapshot := range snapshots {
+		tag := strings.TrimSpace(snapshot.InboundTag)
+		if mappedByTag[tag] == nil {
+			mappedByTag[tag] = make(map[string]struct{}, len(snapshot.WireGuardPeers))
+		}
+		for _, peer := range snapshot.WireGuardPeers {
+			if address, ok := canonicalEmbeddedWireGuardHostPrefix(peer.Address); ok {
+				mappedByTag[tag][address] = struct{}{}
+			}
+		}
+	}
+
+	missing := make(map[string]struct{})
+	for _, inbound := range config.Inbounds {
+		if !strings.EqualFold(strings.TrimSpace(inbound.Protocol), "wireguard") || len(inbound.Settings.Peers) == 0 {
+			continue
+		}
+		tag := strings.TrimSpace(inbound.Tag)
+		mapped := mappedByTag[tag]
+		complete := len(mapped) > 0
+		for _, peer := range inbound.Settings.Peers {
+			if len(peer.AllowedIPs) == 0 {
+				complete = false
+				break
+			}
+			for _, allowedIP := range peer.AllowedIPs {
+				address, ok := canonicalEmbeddedWireGuardHostPrefix(allowedIP)
+				if !ok {
+					complete = false
+					break
+				}
+				if _, ok := mapped[address]; !ok {
+					complete = false
+					break
+				}
+			}
+			if !complete {
+				break
+			}
+		}
+		if !complete {
+			missing[tag] = struct{}{}
+		}
+	}
+	return missing, nil
+}
+
+func canonicalEmbeddedWireGuardHostPrefix(value string) (string, bool) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+	if err != nil || !prefix.IsValid() || prefix.Bits() != prefix.Addr().BitLen() {
+		return "", false
+	}
+	return prefix.Addr().Unmap().String(), true
 }
 
 // suppressConfiguredInbounds removes selected inbound tags from an in-memory
