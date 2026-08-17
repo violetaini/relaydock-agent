@@ -348,6 +348,220 @@ func TestWireGuardInboundRequiresEveryDurableLimiterMapping(t *testing.T) {
 	}
 }
 
+func TestApplyXrayAuthorizationKeepsWireGuardSuppressedUntilDurableMappingsComplete(t *testing.T) {
+	tests := []struct {
+		name       string
+		snapshot   *limiter.PersistentInboundSnapshot
+		wantErr    bool
+		wantActive bool
+	}{
+		{
+			name:    "empty durable state",
+			wantErr: true,
+		},
+		{
+			name: "legacy incomplete snapshot",
+			snapshot: &limiter.PersistentInboundSnapshot{
+				InboundTag: "wg",
+				Users:      []limiter.UserInfo{{Email: "alice@example.com"}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "complete peer mapping",
+			snapshot: &limiter.PersistentInboundSnapshot{
+				InboundTag: "wg",
+				Users:      []limiter.UserInfo{{Email: "alice@example.com"}},
+				WireGuardPeers: []limiter.WireGuardPeerUser{
+					{Address: "10.66.0.2/32", Email: "alice@example.com"},
+				},
+			},
+			wantActive: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			portReservation, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			port := portReservation.LocalAddr().(*net.UDPAddr).Port
+			if err := portReservation.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			inbound := map[string]interface{}{
+				"tag":      "wg",
+				"listen":   "127.0.0.1",
+				"port":     float64(port),
+				"protocol": "wireguard",
+				"settings": map[string]interface{}{
+					"secretKey": wireGuardManagementBase64Key(10),
+					"address":   []interface{}{"10.66.0.1/32"},
+					"mtu":       float64(1420),
+					"peers": []interface{}{map[string]interface{}{
+						"publicKey":  wireGuardManagementBase64Key(11),
+						"allowedIPs": []interface{}{"10.66.0.2/32"},
+						"keepAlive":  float64(25),
+					}},
+				},
+			}
+			config, err := json.Marshal(map[string]interface{}{
+				"inbounds":  []interface{}{inbound},
+				"outbounds": []interface{}{map[string]interface{}{"tag": "direct", "protocol": "freedom"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tempDir := t.TempDir()
+			configPath := filepath.Join(tempDir, "config.json")
+			if err := os.WriteFile(configPath, config, 0600); err != nil {
+				t.Fatal(err)
+			}
+			statePath := filepath.Join(tempDir, "limiter-state.json")
+			limiter.ConfigurePersistentSnapshotPath(statePath)
+			t.Cleanup(func() { limiter.ConfigurePersistentSnapshotPath("") })
+			if test.snapshot != nil {
+				if err := limiter.PersistInboundSnapshot(*test.snapshot); err != nil {
+					t.Fatalf("persist limiter snapshot: %v", err)
+				}
+			}
+
+			handler := NewManageHandler("", "", "")
+			handler.SetXrayMode("embedded")
+			handler.SetInitialXrayAuthorization(false)
+			handler.xrayAuthorizationInboundResolver = func() ([]managedInboundDefinition, error) {
+				return []managedInboundDefinition{{tag: "wg", inbound: inbound}}, nil
+			}
+			xray := embedded.New(configPath)
+			if err := handler.ConfigureEmbeddedXrayForStart(xray); err != nil {
+				t.Fatalf("configure unauthorized startup: %v", err)
+			}
+			if err := xray.Start(); err != nil {
+				t.Fatalf("start embedded Xray with WireGuard suppressed: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := xray.Stop(); err != nil {
+					t.Errorf("stop embedded Xray: %v", err)
+				}
+			})
+			handler.SetEmbeddedXray(xray)
+			if wireGuardAuthorizationTagActive(xray.ListInbounds(), "wg") {
+				t.Fatal("unauthorized WireGuard inbound started before authorization")
+			}
+
+			err = handler.ApplyXrayAuthorization(true)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "limiter mapping is not durable") {
+					t.Fatalf("authorization error=%v, want durable limiter mapping rejection", err)
+				}
+			} else if err != nil {
+				t.Fatalf("authorize mapped WireGuard inbound: %v", err)
+			}
+			if got := wireGuardAuthorizationTagActive(xray.ListInbounds(), "wg"); got != test.wantActive {
+				t.Fatalf("WireGuard active=%v want %v after authorization", got, test.wantActive)
+			}
+		})
+	}
+}
+
+func TestExternalAuthorizationChecksWireGuardMappingBeforeRuntimeAdd(t *testing.T) {
+	limiter.ConfigurePersistentSnapshotPath(filepath.Join(t.TempDir(), "limiter-state.json"))
+	t.Cleanup(func() { limiter.ConfigurePersistentSnapshotPath("") })
+	inbound := map[string]interface{}{
+		"tag":      "wg",
+		"protocol": "wireguard",
+		"settings": map[string]interface{}{
+			"peers": []interface{}{map[string]interface{}{
+				"publicKey":  wireGuardManagementBase64Key(12),
+				"allowedIPs": []interface{}{"10.77.0.2/32"},
+			}},
+		},
+	}
+	handler := NewManageHandler("", "", "")
+	err := handler.applyManagedExternalInboundAuthorization(
+		context.Background(),
+		nil,
+		true,
+		[]managedInboundDefinition{{tag: "wg", inbound: inbound}},
+		map[string]struct{}{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "limiter mapping is not durable") {
+		t.Fatalf("external authorization error=%v, want durable limiter mapping rejection before AddInbound", err)
+	}
+}
+
+func TestPendingMutationRecoveryRejectsWireGuardBeforeRuntimeApply(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	inbound := map[string]interface{}{
+		"tag":      "wg",
+		"protocol": "wireguard",
+		"settings": map[string]interface{}{
+			"peers": []interface{}{map[string]interface{}{
+				"publicKey":  wireGuardManagementBase64Key(13),
+				"allowedIPs": []interface{}{"10.88.0.2/32"},
+			}},
+		},
+	}
+	config, err := json.Marshal(map[string]interface{}{"inbounds": []interface{}{inbound}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	limiter.ConfigurePersistentSnapshotPath(filepath.Join(tempDir, "limiter-state.json"))
+	t.Cleanup(func() { limiter.ConfigurePersistentSnapshotPath("") })
+	runtimeCalls := 0
+	handler := NewManageHandler("", "", "")
+	handler.inboundMutationFencesLoaded = true
+	handler.inboundMutationFences = map[string]inboundMutationFenceState{
+		"wg": {Pending: &inboundMutationFencePending{ConfigPath: configPath}},
+	}
+	handler.inboundMutationConfigPathResolver = func() string { return configPath }
+	handler.inboundMutationRuntimeApply = func(context.Context, string, map[string]interface{}, bool) error {
+		runtimeCalls++
+		return nil
+	}
+	if err := handler.convergePendingInboundRuntimeLocked(); err == nil || !strings.Contains(err.Error(), "limiter mapping is not durable") {
+		t.Fatalf("pending recovery error=%v, want durable limiter mapping rejection", err)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("pending recovery runtime calls=%d want 0", runtimeCalls)
+	}
+}
+
+func TestEmbeddedRuntimeReplacementRejectsIncompleteWireGuardMappingBeforeAdd(t *testing.T) {
+	limiter.ConfigurePersistentSnapshotPath(filepath.Join(t.TempDir(), "limiter-state.json"))
+	t.Cleanup(func() { limiter.ConfigurePersistentSnapshotPath("") })
+	handler := NewManageHandler("", "", "")
+	handler.SetXrayMode("embedded")
+	err := handler.replaceRuntimeInbound(context.Background(), "wg", map[string]interface{}{
+		"tag":      "wg",
+		"protocol": "wireguard",
+		"settings": map[string]interface{}{
+			"peers": []interface{}{map[string]interface{}{
+				"publicKey":  wireGuardManagementBase64Key(14),
+				"allowedIPs": []interface{}{"10.99.0.2/32"},
+			}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "limiter mapping is not durable") {
+		t.Fatalf("runtime replacement error=%v, want durable limiter mapping rejection before AddInbound", err)
+	}
+}
+
+func wireGuardAuthorizationTagActive(tags []string, target string) bool {
+	for _, tag := range tags {
+		if tag == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBatchApplyRejectsWireGuardBeforeAnySideEffects(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.json")

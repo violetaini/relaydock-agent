@@ -605,6 +605,13 @@ func (h *ManageHandler) applyManagedInboundAuthorizationLocked(authorized bool, 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if h.xrayAuthorizationRuntimeApply != nil {
+		if authorized {
+			for _, definition := range definitions {
+				if err := requireManagedWireGuardRuntimeActivation(definition); err != nil {
+					return err
+				}
+			}
+		}
 		return h.xrayAuthorizationRuntimeApply(ctx, authorized, definitions)
 	}
 
@@ -656,6 +663,15 @@ func (h *ManageHandler) applyManagedEmbeddedInboundAuthorization(
 			}
 			continue
 		}
+		if err := requireManagedWireGuardRuntimeActivation(definition); err != nil {
+			if running {
+				if removeErr := h.embeddedXray.RemoveInbound(definition.tag); removeErr != nil && !isMissingInboundError(removeErr) {
+					errs = append(errs, fmt.Errorf("suppress managed inbound %s after limiter mapping rejection: %w", definition.tag, removeErr))
+				}
+			}
+			errs = append(errs, err)
+			continue
+		}
 		if running {
 			continue
 		}
@@ -692,6 +708,15 @@ func (h *ManageHandler) applyManagedExternalInboundAuthorization(
 			}
 			continue
 		}
+		if err := requireManagedWireGuardRuntimeActivation(definition); err != nil {
+			if running {
+				if removeErr := h.removeInbound(ctx, handlerClient, definition.tag); removeErr != nil && !isMissingInboundError(removeErr) {
+					errs = append(errs, fmt.Errorf("suppress managed inbound %s after limiter mapping rejection: %w", definition.tag, removeErr))
+				}
+			}
+			errs = append(errs, err)
+			continue
+		}
 		if running {
 			continue
 		}
@@ -707,6 +732,16 @@ func (h *ManageHandler) applyManagedExternalInboundAuthorization(
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func requireManagedWireGuardRuntimeActivation(definition managedInboundDefinition) error {
+	if definition.inbound == nil {
+		return nil
+	}
+	if err := requireWireGuardInboundPeerMappings(definition.inbound); err != nil {
+		return fmt.Errorf("enable managed inbound %s: WireGuard limiter mapping is not durable: %w", definition.tag, err)
+	}
+	return nil
 }
 
 func buildRuntimeInboundConfig(inbound map[string]interface{}) (*core.InboundHandlerConfig, error) {
@@ -3968,6 +4003,11 @@ func (h *ManageHandler) replaceRuntimeInbound(ctx context.Context, tag string, n
 			// slot again.
 			log.Printf("[Manage] Deferred runtime replacement of unauthorized managed inbound %s", tag)
 			return nil
+		}
+	}
+	if strings.EqualFold(h.xrayMode, "embedded") {
+		if err := requireWireGuardInboundPeerMappings(newInbound); err != nil {
+			return fmt.Errorf("replace WireGuard inbound %s: limiter mapping is not durable: %w", tag, err)
 		}
 	}
 	if h.xrayMode == "embedded" && h.embeddedXray != nil {

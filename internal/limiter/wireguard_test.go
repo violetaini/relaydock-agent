@@ -117,6 +117,32 @@ func TestSyncInboundLimiterCannotDisableWireGuardIdentityRequirement(t *testing.
 	}
 }
 
+func TestSyncInboundLimiterAppliesWireGuardTombstoneToExistingBucket(t *testing.T) {
+	l := New()
+	const (
+		tag   = "wg"
+		email = "alice@example.com"
+	)
+	peer := WireGuardPeerUser{Address: "10.10.0.2/32", Email: email}
+	l.AddInboundLimiter(tag, 0, []UserInfo{{UID: 1, Email: email, SpeedLimit: 625000}}, peer)
+
+	bucket, hasLimit, reject := l.GetUserBucket(tag, email, "10.10.0.2")
+	if reject || !hasLimit || bucket == nil {
+		t.Fatalf("GetUserBucket: reject=%v hasLimit=%v bucket=%v", reject, hasLimit, bucket)
+	}
+
+	l.SyncInboundLimiter(tag, 0, []UserInfo{{UID: 1, Email: email, SpeedLimit: 1, DeviceLimit: 1}}, peer)
+
+	if got := bucket.Limit(); got != rate.Limit(1) {
+		t.Fatalf("existing WireGuard bucket limit=%v, want 1 B/s", got)
+	}
+	if current, ok := l.InboundInfo.Load(tag); !ok {
+		t.Fatal("WireGuard limiter disappeared after tombstone sync")
+	} else if stored, ok := current.(*InboundInfo).BucketHub.Load(email); !ok || stored.(*rate.Limiter) != bucket {
+		t.Fatal("tombstone sync replaced the bucket held by an existing connection")
+	}
+}
+
 func TestRateReaderPreservesTimeoutReaderContract(t *testing.T) {
 	source := &wireGuardRateReaderStub{data: []byte("wireguard")}
 	reader := NewRateReader(source, rate.NewLimiter(rate.Inf, 1024))

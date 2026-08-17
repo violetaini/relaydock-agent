@@ -867,11 +867,14 @@ func (h *ManageHandler) convergePendingInboundRuntimeLocked() error {
 			return fmt.Errorf("read durable inbound %s for runtime convergence: %w", tag, err)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if h.inboundMutationRuntimeApply != nil {
+		if present {
+			err = requireManagedWireGuardRuntimeActivation(managedInboundDefinition{tag: tag, inbound: inbound})
+		}
+		if err == nil && h.inboundMutationRuntimeApply != nil {
 			err = h.inboundMutationRuntimeApply(ctx, tag, inbound, present)
-		} else if present {
+		} else if err == nil && present {
 			err = h.replaceRuntimeInbound(ctx, tag, inbound)
-		} else {
+		} else if err == nil {
 			err = h.removeRuntimeInboundForRecovery(ctx, tag)
 		}
 		cancel()
