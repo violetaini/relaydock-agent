@@ -2234,6 +2234,7 @@ func (h *ManageHandler) HandleSystemInfo(w http.ResponseWriter, r *http.Request)
 			constants.CapabilityXrayVersionSelectV1:  true,
 			constants.CapabilityXrayAuthorizationV2:  true,
 			constants.CapabilityWireGuardPeerUsersV1: strings.EqualFold(h.xrayMode, "embedded"),
+			constants.CapabilityLimiterDeniedV1:      true,
 		},
 	}
 
@@ -7320,6 +7321,7 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 			SpeedLimit  uint64 `json:"speed_limit"`
 			DeviceLimit int    `json:"device_limit"`
 			ConnGroup   string `json:"conn_group,omitempty"`
+			Denied      bool   `json:"denied,omitempty"`
 		} `json:"users"`
 		WireGuardPeers []struct {
 			Address string `json:"address"`
@@ -7340,6 +7342,7 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 			SpeedLimit:  u.SpeedLimit,
 			DeviceLimit: u.DeviceLimit,
 			ConnGroup:   u.ConnGroup,
+			Denied:      u.Denied,
 		}
 	}
 	wgPeers := make([]limiter.WireGuardPeerUser, len(req.WireGuardPeers))

@@ -70,6 +70,7 @@ const (
 	CapabilityXrayVersionSelectV1  = "xray_version_select_v1"
 	CapabilityXrayAuthorizationV2  = "xray_authorization_v2"
 	CapabilityWireGuardPeerUsersV1 = "wireguard_peer_users_v1"
+	CapabilityLimiterDeniedV1      = "limiter_denied_v1"
 )
 
 const (

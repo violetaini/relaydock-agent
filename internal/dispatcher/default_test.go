@@ -147,6 +147,25 @@ func TestGetLinkRejectsWireGuardSourceAfterEmptySnapshot(t *testing.T) {
 	}
 }
 
+func TestGetLinkRejectsDeniedMappedWireGuardUser(t *testing.T) {
+	l := limiter.New()
+	const tag = "wg"
+	l.AddInboundLimiter(tag, 0, []limiter.UserInfo{{UID: 1, Email: "alice@example.com", Denied: true}}, limiter.WireGuardPeerUser{
+		Address: "10.20.0.2/32",
+		Email:   "alice@example.com",
+	})
+	d := &Dispatcher{Limiter: l}
+	inbound := &session.Inbound{Tag: tag, Source: net.Destination{Address: net.ParseAddress("10.20.0.2")}}
+	ctx := session.ContextWithInbound(context.Background(), inbound)
+	inboundLink, outboundLink, err := d.getLink(ctx)
+	if err == nil || !strings.Contains(err.Error(), "connection limit reached") {
+		t.Fatalf("getLink error=%v", err)
+	}
+	if inboundLink != nil || outboundLink != nil {
+		t.Fatalf("denied source returned links: inbound=%v outbound=%v", inboundLink, outboundLink)
+	}
+}
+
 func TestDispatchLinkRejectsAndClosesUnknownWireGuardSource(t *testing.T) {
 	l := limiter.New()
 	const tag = "wg"

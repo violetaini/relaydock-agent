@@ -155,6 +155,9 @@ func TestSystemInfoAdvertisesXrayVersionSelection(t *testing.T) {
 			if actual := payload.Capabilities[constants.CapabilityWireGuardPeerUsersV1]; actual != test.wantWireGuard {
 				t.Fatalf("wireguard capability=%v want %v; capabilities=%v", actual, test.wantWireGuard, payload.Capabilities)
 			}
+			if !payload.Capabilities[constants.CapabilityLimiterDeniedV1] {
+				t.Fatalf("explicit limiter deny capability missing: %v", payload.Capabilities)
+			}
 		})
 	}
 }

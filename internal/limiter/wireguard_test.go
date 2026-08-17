@@ -124,7 +124,9 @@ func TestSyncInboundLimiterAppliesWireGuardTombstoneToExistingBucket(t *testing.
 		email = "alice@example.com"
 	)
 	peer := WireGuardPeerUser{Address: "10.10.0.2/32", Email: email}
-	l.AddInboundLimiter(tag, 0, []UserInfo{{UID: 1, Email: email, SpeedLimit: 625000}}, peer)
+	// Unlimited users still receive a shared bucket so a later deny can stop
+	// already-open links instead of affecting only new connections.
+	l.AddInboundLimiter(tag, 0, []UserInfo{{UID: 1, Email: email}}, peer)
 
 	bucket, hasLimit, reject := l.GetUserBucket(tag, email, "10.10.0.2")
 	if reject || !hasLimit || bucket == nil {
@@ -140,6 +142,30 @@ func TestSyncInboundLimiterAppliesWireGuardTombstoneToExistingBucket(t *testing.
 		t.Fatal("WireGuard limiter disappeared after tombstone sync")
 	} else if stored, ok := current.(*InboundInfo).BucketHub.Load(email); !ok || stored.(*rate.Limiter) != bucket {
 		t.Fatal("tombstone sync replaced the bucket held by an existing connection")
+	}
+}
+
+func TestDeniedUserIsRejectedAndExistingBucketIsStopped(t *testing.T) {
+	l := New()
+	const (
+		tag   = "wg"
+		email = "alice@example.com"
+	)
+	peer := WireGuardPeerUser{Address: "10.10.0.2/32", Email: email}
+	l.AddInboundLimiter(tag, 0, []UserInfo{{UID: 1, Email: email, SpeedLimit: 625000}}, peer)
+	bucket, _, reject := l.GetUserBucket(tag, email, "10.10.0.2")
+	if reject || bucket == nil {
+		t.Fatalf("initial bucket reject=%v bucket=%v", reject, bucket)
+	}
+	l.SyncInboundLimiter(tag, 0, []UserInfo{{UID: 1, Email: email, SpeedLimit: 1, DeviceLimit: 1, Denied: true}}, peer)
+	if _, _, reject := l.GetUserBucket(tag, email, "10.10.0.2"); !reject {
+		t.Fatal("denied user was not rejected on a new connection")
+	}
+	if got := bucket.Limit(); got != 0 {
+		t.Fatalf("existing bucket limit=%v, want zero after deny", got)
+	}
+	if ok, _ := l.AcquireConn(tag, email); ok {
+		t.Fatal("denied user acquired a connection")
 	}
 }
 

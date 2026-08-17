@@ -212,11 +212,16 @@ func (d *Dispatcher) getLink(ctx context.Context) (*transport.Link, *transport.L
 			context.AfterFunc(ctx, func() { d.Limiter.ReleaseConn(group) })
 		}
 
-		bucket, hasLimit, _ := d.Limiter.GetUserBucket(
+		bucket, hasLimit, reject := d.Limiter.GetUserBucket(
 			sessionInbound.Tag,
 			user.Email,
 			inboundSourceHostIP(sessionInbound),
 		)
+		if reject {
+			interruptAndCloseLink(inboundLink)
+			interruptAndCloseLink(outboundLink)
+			return nil, nil, errors.New("user access denied: ", user.Email)
+		}
 		if hasLimit {
 			inboundLink.Writer = d.Limiter.RateWriter(inboundLink.Writer, bucket)
 			outboundLink.Writer = d.Limiter.RateWriter(outboundLink.Writer, bucket)
@@ -375,11 +380,13 @@ func (d *Dispatcher) DispatchLink(ctx context.Context, destination net.Destinati
 			} else if group != "" {
 				context.AfterFunc(ctx, func() { d.Limiter.ReleaseConn(group) })
 			}
-			if d.Limiter.HasWireGuardPeerMappings(si.Tag) {
-				if bucket, hasLimit, _ := d.Limiter.GetUserBucket(si.Tag, user.Email, inboundSourceHostIP(si)); hasLimit {
-					outbound.Reader = d.Limiter.RateReader(outbound.Reader, bucket)
-					outbound.Writer = d.Limiter.RateWriter(outbound.Writer, bucket)
-				}
+			if bucket, hasLimit, reject := d.Limiter.GetUserBucket(si.Tag, user.Email, inboundSourceHostIP(si)); reject {
+				common.Interrupt(outbound.Reader)
+				common.Close(outbound.Writer)
+				return errors.New("user access denied: ", user.Email)
+			} else if hasLimit {
+				outbound.Reader = d.Limiter.RateReader(outbound.Reader, bucket)
+				outbound.Writer = d.Limiter.RateWriter(outbound.Writer, bucket)
 			}
 		}
 	}

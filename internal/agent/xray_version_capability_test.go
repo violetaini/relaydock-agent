@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	"github.com/violetaini/relaydock-agent/internal/config"
 	"github.com/violetaini/relaydock-agent/internal/constants"
 )
@@ -23,6 +25,9 @@ func TestAdvertisedCapabilitiesIncludeXrayVersionSelection(t *testing.T) {
 			}
 			if got := capabilities[constants.CapabilityWireGuardPeerUsersV1]; got != embedded {
 				t.Fatalf("embedded=%v wireguard capability=%v capabilities=%v", embedded, got, capabilities)
+			}
+			if !capabilities[constants.CapabilityLimiterDeniedV1] {
+				t.Fatalf("explicit limiter deny capability missing: %v", capabilities)
 			}
 		}
 	}
@@ -70,6 +75,101 @@ func TestHTTPTrafficAdvertisesXrayAuthorizationV2(t *testing.T) {
 			if actual := got[constants.CapabilityWireGuardPeerUsersV1]; actual != test.wantWireGuard {
 				t.Fatalf("wireguard capability=%v want %v; capabilities=%v", actual, test.wantWireGuard, got)
 			}
+			if !got[constants.CapabilityLimiterDeniedV1] {
+				t.Fatalf("explicit limiter deny capability missing: %v", got)
+			}
 		})
+	}
+}
+
+func TestHTTPHeartbeatAdvertisesLimiterDeniedV1(t *testing.T) {
+	capabilities := make(chan map[string]bool, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != constants.PathRemoteHeartbeat {
+			t.Errorf("path=%s want %s", r.URL.Path, constants.PathRemoteHeartbeat)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var payload struct {
+			Capabilities map[string]bool `json:"capabilities"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode heartbeat payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		capabilities <- payload.Capabilities
+		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+		_, _ = w.Write([]byte(`{"server_time":1}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(&config.Config{MasterURL: server.URL, Token: "test-token", XrayMode: "embedded"})
+	client.httpClient = server.Client()
+	if err := client.sendHeartbeatHTTP(context.Background()); err != nil {
+		t.Fatalf("send HTTP heartbeat: %v", err)
+	}
+	got := <-capabilities
+	if !got[constants.CapabilityLimiterDeniedV1] {
+		t.Fatalf("heartbeat capabilities=%v", got)
+	}
+}
+
+func TestWSHeartbeatAdvertisesLimiterDeniedV1(t *testing.T) {
+	type heartbeatResult struct {
+		messageType  string
+		capabilities map[string]bool
+		err          error
+	}
+	result := make(chan heartbeatResult, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			result <- heartbeatResult{err: err}
+			return
+		}
+		defer conn.Close()
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			result <- heartbeatResult{err: err}
+			return
+		}
+		var message struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(body, &message); err != nil {
+			result <- heartbeatResult{err: err}
+			return
+		}
+		var payload struct {
+			Capabilities map[string]bool `json:"capabilities"`
+		}
+		if err := json.Unmarshal(message.Payload, &payload); err != nil {
+			result <- heartbeatResult{err: err}
+			return
+		}
+		result <- heartbeatResult{messageType: message.Type, capabilities: payload.Capabilities}
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial heartbeat test WebSocket: %v", err)
+	}
+	defer conn.Close()
+	client := NewClient(&config.Config{ListenPort: "50100", XrayMode: "embedded"})
+	if err := client.sendHeartbeat(conn); err != nil {
+		t.Fatalf("send WS heartbeat: %v", err)
+	}
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("read WS heartbeat: %v", got.err)
+	}
+	if got.messageType != "heartbeat" {
+		t.Fatalf("message type=%q want heartbeat", got.messageType)
+	}
+	if !got.capabilities[constants.CapabilityLimiterDeniedV1] {
+		t.Fatalf("heartbeat capabilities=%v", got.capabilities)
 	}
 }

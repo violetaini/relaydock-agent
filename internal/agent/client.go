@@ -712,6 +712,7 @@ func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported, wireGuardPe
 		constants.CapabilityXrayVersionSelectV1:  true,
 		constants.CapabilityXrayAuthorizationV2:  true,
 		constants.CapabilityWireGuardPeerUsersV1: wireGuardPeerUsersSupported,
+		constants.CapabilityLimiterDeniedV1:      true,
 	}
 }
 
@@ -987,6 +988,11 @@ func (c *Client) sendHeartbeat(conn *websocket.Conn) error {
 		"public_ipv6":         publicIPv6,
 		"warp_installed":      warpInstalled,
 		"same_host_as_master": c.sameHostAsMaster(),
+		"capabilities": advertisedCapabilities(
+			c.rpcMux != nil,
+			util.SupportsAgentUninstallV2(),
+			strings.EqualFold(c.config.XrayMode, "embedded"),
+		),
 	})
 
 	msg := map[string]interface{}{
@@ -1485,6 +1491,11 @@ func (c *Client) sendHeartbeatHTTP(ctx context.Context) error {
 		"local_time":  time.Now().Unix(),
 		"public_ipv4": c.getPublicIPv4(),
 		"public_ipv6": c.getPublicIPv6(),
+		"capabilities": advertisedCapabilities(
+			false,
+			util.SupportsAgentUninstallV2(),
+			strings.EqualFold(c.config.XrayMode, "embedded"),
+		),
 	})
 
 	u, err := url.Parse(c.config.MasterURL)
@@ -1945,6 +1956,7 @@ type WSUserLimitInfo struct {
 	SpeedLimit  uint64 `json:"speed_limit"`
 	DeviceLimit int    `json:"device_limit"`
 	ConnGroup   string `json:"conn_group,omitempty"` // "<user>|<物理父节点ID>";空=退化按 email 计数(老主控兼容)
+	Denied      bool   `json:"denied,omitempty"`
 }
 
 type WSWireGuardPeerUser struct {
@@ -2183,6 +2195,7 @@ func (c *Client) handleLimiterConfig(payload WSLimiterConfigPayload) {
 			SpeedLimit:  u.SpeedLimit,
 			DeviceLimit: u.DeviceLimit,
 			ConnGroup:   u.ConnGroup,
+			Denied:      u.Denied,
 		}
 	}
 	wgPeers := make([]limiter.WireGuardPeerUser, len(payload.WireGuardPeers))

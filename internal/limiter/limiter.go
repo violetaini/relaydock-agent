@@ -155,6 +155,10 @@ func (l *Limiter) AcquireConn(tag, email string) (ok bool, group string) {
 	if !found {
 		return true, "" // 无该用户限流记录(如未下发)→ 放行不计数
 	}
+	if u.Denied {
+		incrementKickCounter(email)
+		return false, ""
+	}
 	group = u.ConnGroup
 	if group == "" {
 		group = email
@@ -266,14 +270,23 @@ func (l *Limiter) SyncInboundLimiter(tag string, nodeSpeedLimit uint64, users []
 	// limit==0(无限制)不动:同 UpdateInboundLimiter 的说明 —— 删桶或原地置无限
 	// 都会破坏正在生效的自动限速。空闲桶由 GetOnlineUsers 统一回收。
 	for _, u := range users {
-		limit := determineRate(nodeSpeedLimit, u.SpeedLimit)
-		if limit <= 0 {
-			continue
-		}
 		if bucket, ok := info.BucketHub.Load(u.Email); ok {
 			b := bucket.(*rate.Limiter)
-			b.SetLimit(rate.Limit(limit))
-			b.SetBurst(calcBurst(limit))
+			if u.Denied {
+				// A zero-rate, zero-burst bucket makes existing wrappers fail their
+				// next wait instead of retaining the previous burst allowance.
+				b.SetLimit(0)
+				b.SetBurst(0)
+				continue
+			}
+			limit := determineRate(nodeSpeedLimit, u.SpeedLimit)
+			if limit > 0 {
+				b.SetLimit(rate.Limit(limit))
+				b.SetBurst(calcBurst(limit))
+			} else {
+				b.SetLimit(rate.Limit(math.MaxFloat64))
+				b.SetBurst(math.MaxInt)
+			}
 		}
 	}
 }
@@ -288,6 +301,14 @@ func (l *Limiter) UpdateInboundLimiter(tag string, users []UserInfo) {
 	for _, u := range users {
 		key := fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
 		info.UserInfo.Store(key, u)
+		if u.Denied {
+			if bucket, ok := info.BucketHub.Load(u.Email); ok {
+				b := bucket.(*rate.Limiter)
+				b.SetLimit(0)
+				b.SetBurst(0)
+			}
+			continue
+		}
 		limit := determineRate(info.NodeSpeedLimit, u.SpeedLimit)
 		// BucketHub 以 email 为 key(与 GetUserBucket 存的一致),不能用组合 key,否则 Load 永远 miss。
 		if limit > 0 {
@@ -319,6 +340,7 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 
 	var userLimit uint64
 	var uid int
+	var denied bool
 
 	// Find user info by scanning keys with matching tag and email prefix
 	info.UserInfo.Range(func(k, v interface{}) bool {
@@ -328,10 +350,17 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 		if len(key) >= len(expectedPrefix) && key[:len(expectedPrefix)] == expectedPrefix {
 			uid = u.UID
 			userLimit = u.SpeedLimit
+			if u.Denied {
+				denied = true
+			}
 			return false
 		}
 		return true
 	})
+
+	if denied {
+		return nil, false, true
+	}
 
 	// 连接数限制已迁到 AcquireConn(按 group 精确并发计数、满额拒绝),与此处解耦。
 	// 这里只记录 IP 给在线用户上报用(GetOnlineUsers 每周期重置)。reject 恒为 false。
@@ -442,6 +471,14 @@ func (l *Limiter) SetUserSpeed(tag, email string, speedLimit uint64) {
 		return
 	}
 	info := value.(*InboundInfo)
+	if user, found := l.lookupUserInfo(tag, email); found && user.Denied {
+		if bucket, exists := info.BucketHub.Load(email); exists {
+			b := bucket.(*rate.Limiter)
+			b.SetLimit(0)
+			b.SetBurst(0)
+		}
+		return
+	}
 	if speedLimit > 0 {
 		// 标记该 email 正被 auto 限速,GetOnlineUsers/UpdateInboundLimiter 清理时跳过,防止 bucket 被删/重置。
 		l.autoLimited.Store(email, struct{}{})
