@@ -123,3 +123,60 @@ func TestAutoLimitSurvivesCleanupAndSync(t *testing.T) {
 		t.Fatal("restore 后空闲 bucket 应被清理")
 	}
 }
+
+func TestInboundSharedBucketIsAggregateAndUpdatesLive(t *testing.T) {
+	l := New()
+	const tag = "forward-42-hop-0"
+	l.AddInboundLimiterWithSharedLimit(tag, 1<<20, true, nil)
+
+	first, enabled := l.GetInboundSharedBucket(tag)
+	if !enabled || first == nil {
+		t.Fatal("shared inbound limiter was not enabled")
+	}
+	second, enabled := l.GetInboundSharedBucket(tag)
+	if !enabled || second != first {
+		t.Fatal("connections on the same inbound must share one bucket")
+	}
+	if got := uint64(first.Limit()); got != 1<<20 {
+		t.Fatalf("initial shared rate=%d want %d", got, 1<<20)
+	}
+
+	l.SyncInboundLimiterWithSharedLimit(tag, 2<<20, true, nil)
+	updated, enabled := l.GetInboundSharedBucket(tag)
+	if !enabled || updated != first {
+		t.Fatal("sync replaced the live shared bucket")
+	}
+	if got := uint64(first.Limit()); got != 2<<20 {
+		t.Fatalf("live shared rate=%d want %d", got, 2<<20)
+	}
+
+	l.SyncInboundLimiterWithSharedLimit(tag, 0, true, nil)
+	if _, enabled := l.GetInboundSharedBucket(tag); enabled {
+		t.Fatal("zero node_limit must disable wrapping for new links")
+	}
+	if first.Limit() != rate.Inf {
+		t.Fatalf("existing shared wrappers were not restored to unlimited: %v", first.Limit())
+	}
+}
+
+func TestInboundSharedBucketDoesNotReplaceAuthenticatedUserBucket(t *testing.T) {
+	l := New()
+	const tag = "mixed"
+	const email = "alice@example.com"
+	l.AddInboundLimiterWithSharedLimit(tag, 1<<20, true, []UserInfo{{UID: 1, Email: email, SpeedLimit: 512 << 10}})
+
+	shared, enabled := l.GetInboundSharedBucket(tag)
+	if !enabled {
+		t.Fatal("shared bucket not enabled")
+	}
+	user, hasLimit, reject := l.GetUserBucket(tag, email, "192.0.2.1")
+	if reject || !hasLimit || user == nil {
+		t.Fatalf("user bucket: reject=%v hasLimit=%v bucket=%v", reject, hasLimit, user)
+	}
+	if user == shared {
+		t.Fatal("authenticated traffic must retain its per-user bucket")
+	}
+	if got := uint64(user.Limit()); got != 512<<10 {
+		t.Fatalf("user rate=%d want %d", got, 512<<10)
+	}
+}

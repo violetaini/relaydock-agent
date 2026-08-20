@@ -158,6 +158,9 @@ func TestSystemInfoAdvertisesXrayVersionSelection(t *testing.T) {
 			if !payload.Capabilities[constants.CapabilityLimiterDeniedV1] {
 				t.Fatalf("explicit limiter deny capability missing: %v", payload.Capabilities)
 			}
+			if actual := payload.Capabilities[constants.CapabilityForwardingSpeedLimitV1]; actual != test.wantWireGuard {
+				t.Fatalf("forwarding speed capability=%v want %v; capabilities=%v", actual, test.wantWireGuard, payload.Capabilities)
+			}
 		})
 	}
 }

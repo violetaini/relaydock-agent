@@ -34,6 +34,8 @@ func newEmailIPMap() *emailIPMap {
 type InboundInfo struct {
 	Tag                       string
 	NodeSpeedLimit            uint64            // Bytes/s, 0 = unlimited
+	InboundSharedLimit        bool              // anonymous traffic shares one tag-scoped bucket when enabled
+	InboundSharedBucket       *rate.Limiter     // stable across syncs so existing forwarding links update immediately
 	UserInfo                  *sync.Map         // key: "tag|email|uid" -> UserInfo (GetUserBucket 用 "tag|email|" 前缀匹配)
 	BucketHub                 *sync.Map         // key: email -> *rate.Limiter (与 GetUserBucket/SetUserSpeed 一致)
 	UserOnlineIP              *sync.Map         // key: email -> *emailIPMap (内层 ip -> *ipEntry + mu)
@@ -212,10 +214,21 @@ func New() *Limiter {
 }
 
 func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, users []UserInfo, wgPeers ...WireGuardPeerUser) {
+	l.AddInboundLimiterWithSharedLimit(tag, nodeSpeedLimit, false, users, wgPeers...)
+}
+
+// AddInboundLimiterWithSharedLimit enables a single tag-scoped rate bucket for
+// anonymous traffic. It is intended for dokodemo-door forwarding inbounds;
+// authenticated and WireGuard traffic continues to use per-user buckets.
+func (l *Limiter) AddInboundLimiterWithSharedLimit(tag string, nodeSpeedLimit uint64, inboundSharedLimit bool, users []UserInfo, wgPeers ...WireGuardPeerUser) {
 	wgUsers := buildWireGuardUsers(wgPeers)
+	sharedBucket := rate.NewLimiter(rate.Limit(math.MaxFloat64), math.MaxInt)
+	setLimiterRate(sharedBucket, sharedLimitRate(nodeSpeedLimit, inboundSharedLimit))
 	info := &InboundInfo{
 		Tag:                       tag,
 		NodeSpeedLimit:            nodeSpeedLimit,
+		InboundSharedLimit:        inboundSharedLimit,
+		InboundSharedBucket:       sharedBucket,
 		UserInfo:                  new(sync.Map),
 		BucketHub:                 new(sync.Map),
 		UserOnlineIP:              new(sync.Map),
@@ -242,19 +255,32 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, users []U
 // UserOnlineIP 同理:重建会把在线设备统计清零,而限速下发在每次 WS 重连时
 // 都会发生,等于设备数统计被反复清空。
 func (l *Limiter) SyncInboundLimiter(tag string, nodeSpeedLimit uint64, users []UserInfo, wgPeers ...WireGuardPeerUser) {
+	l.SyncInboundLimiterWithSharedLimit(tag, nodeSpeedLimit, false, users, wgPeers...)
+}
+
+// SyncInboundLimiterWithSharedLimit refreshes both user policies and the
+// optional anonymous inbound-wide bucket while preserving live bucket objects.
+func (l *Limiter) SyncInboundLimiterWithSharedLimit(tag string, nodeSpeedLimit uint64, inboundSharedLimit bool, users []UserInfo, wgPeers ...WireGuardPeerUser) {
 	old, ok := l.InboundInfo.Load(tag)
 	if !ok {
-		l.AddInboundLimiter(tag, nodeSpeedLimit, users, wgPeers...)
+		l.AddInboundLimiterWithSharedLimit(tag, nodeSpeedLimit, inboundSharedLimit, users, wgPeers...)
 		return
 	}
 	prev := old.(*InboundInfo)
 	wgUsers := buildWireGuardUsers(wgPeers)
+	sharedBucket := prev.InboundSharedBucket
+	if sharedBucket == nil {
+		sharedBucket = rate.NewLimiter(rate.Limit(math.MaxFloat64), math.MaxInt)
+	}
+	setLimiterRate(sharedBucket, sharedLimitRate(nodeSpeedLimit, inboundSharedLimit))
 
 	// 仍然整体换 InboundInfo 而不是原地改 NodeSpeedLimit:后者会与 GetUserBucket
 	// 的无锁读构成数据竞争。换指针由 sync.Map.Store 保证可见性。
 	info := &InboundInfo{
 		Tag:                       tag,
 		NodeSpeedLimit:            nodeSpeedLimit,
+		InboundSharedLimit:        inboundSharedLimit,
+		InboundSharedBucket:       sharedBucket,
 		UserInfo:                  new(sync.Map),
 		BucketHub:                 prev.BucketHub,
 		UserOnlineIP:              prev.UserOnlineIP,
@@ -289,6 +315,38 @@ func (l *Limiter) SyncInboundLimiter(tag string, nodeSpeedLimit uint64, users []
 			}
 		}
 	}
+}
+
+func sharedLimitRate(nodeSpeedLimit uint64, enabled bool) uint64 {
+	if !enabled {
+		return 0
+	}
+	return nodeSpeedLimit
+}
+
+func setLimiterRate(bucket *rate.Limiter, bytesPerSecond uint64) {
+	if bytesPerSecond == 0 {
+		bucket.SetLimit(rate.Limit(math.MaxFloat64))
+		bucket.SetBurst(math.MaxInt)
+		return
+	}
+	bucket.SetLimit(rate.Limit(bytesPerSecond))
+	bucket.SetBurst(calcBurst(bytesPerSecond))
+}
+
+// GetInboundSharedBucket returns the tag-scoped aggregate bucket for anonymous
+// traffic. A false result means the inbound did not explicitly opt in or its
+// current limit is unlimited.
+func (l *Limiter) GetInboundSharedBucket(tag string) (*rate.Limiter, bool) {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return nil, false
+	}
+	info := value.(*InboundInfo)
+	if !info.InboundSharedLimit || info.NodeSpeedLimit == 0 || info.InboundSharedBucket == nil {
+		return nil, false
+	}
+	return info.InboundSharedBucket, true
 }
 
 func (l *Limiter) UpdateInboundLimiter(tag string, users []UserInfo) {

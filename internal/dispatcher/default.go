@@ -147,6 +147,18 @@ func interruptAndCloseLink(link *transport.Link) {
 	}
 }
 
+func (d *Dispatcher) limitAnonymousDispatchLink(tag string, link *transport.Link) {
+	if d.Limiter == nil || link == nil {
+		return
+	}
+	bucket, enabled := d.Limiter.GetInboundSharedBucket(tag)
+	if !enabled {
+		return
+	}
+	link.Reader = d.Limiter.RateReader(link.Reader, bucket)
+	link.Writer = d.Limiter.RateWriter(link.Writer, bucket)
+}
+
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		d := &Dispatcher{}
@@ -254,6 +266,11 @@ func (d *Dispatcher) getLink(ctx context.Context) (*transport.Link, *transport.L
 				om.AddIP(userIP)
 				context.AfterFunc(ctx, func() { om.RemoveIP(userIP) })
 			}
+		}
+	} else if sessionInbound != nil && d.Limiter != nil {
+		if bucket, enabled := d.Limiter.GetInboundSharedBucket(sessionInbound.Tag); enabled {
+			inboundLink.Writer = d.Limiter.RateWriter(inboundLink.Writer, bucket)
+			outboundLink.Writer = d.Limiter.RateWriter(outboundLink.Writer, bucket)
 		}
 	}
 
@@ -388,6 +405,8 @@ func (d *Dispatcher) DispatchLink(ctx context.Context, destination net.Destinati
 				outbound.Reader = d.Limiter.RateReader(outbound.Reader, bucket)
 				outbound.Writer = d.Limiter.RateWriter(outbound.Writer, bucket)
 			}
+		} else if d.Limiter != nil {
+			d.limitAnonymousDispatchLink(si.Tag, outbound)
 		}
 	}
 	outbounds := session.OutboundsFromContext(ctx)

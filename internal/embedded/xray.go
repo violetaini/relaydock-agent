@@ -125,9 +125,10 @@ func (e *EmbeddedXray) Start() (retErr error) {
 			return fmt.Errorf("persistent limiter state is present but the embedded dispatcher is unavailable")
 		}
 		for _, snapshot := range snapshots {
-			runtimeDispatcher.Limiter.SyncInboundLimiter(
+			runtimeDispatcher.Limiter.SyncInboundLimiterWithSharedLimit(
 				snapshot.InboundTag,
 				snapshot.NodeLimit,
+				snapshot.InboundSharedLimit,
 				snapshot.Users,
 				snapshot.WireGuardPeers...,
 			)

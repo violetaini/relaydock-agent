@@ -2230,11 +2230,12 @@ func (h *ManageHandler) HandleSystemInfo(w http.ResponseWriter, r *http.Request)
 		"success":       true,
 		"agent_version": version.Version, // 主控用这个对比 GitHub latest tag 决定是否提示升级
 		"capabilities": map[string]bool{
-			constants.CapabilityAgentUninstallV2:     h.supportsAgentUninstallV2(),
-			constants.CapabilityXrayVersionSelectV1:  true,
-			constants.CapabilityXrayAuthorizationV2:  true,
-			constants.CapabilityWireGuardPeerUsersV1: strings.EqualFold(h.xrayMode, "embedded"),
-			constants.CapabilityLimiterDeniedV1:      true,
+			constants.CapabilityAgentUninstallV2:       h.supportsAgentUninstallV2(),
+			constants.CapabilityXrayVersionSelectV1:    true,
+			constants.CapabilityXrayAuthorizationV2:    true,
+			constants.CapabilityWireGuardPeerUsersV1:   strings.EqualFold(h.xrayMode, "embedded"),
+			constants.CapabilityLimiterDeniedV1:        true,
+			constants.CapabilityForwardingSpeedLimitV1: strings.EqualFold(h.xrayMode, "embedded"),
 		},
 	}
 
@@ -7313,9 +7314,10 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		InboundTag string `json:"inbound_tag"`
-		NodeLimit  uint64 `json:"node_limit"`
-		Users      []struct {
+		InboundTag         string `json:"inbound_tag"`
+		NodeLimit          uint64 `json:"node_limit"`
+		InboundSharedLimit bool   `json:"inbound_shared_limit,omitempty"`
+		Users              []struct {
 			UID         int    `json:"uid"`
 			Email       string `json:"email"`
 			SpeedLimit  uint64 `json:"speed_limit"`
@@ -7353,10 +7355,11 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	snapshot := limiter.PersistentInboundSnapshot{
-		InboundTag:     req.InboundTag,
-		NodeLimit:      req.NodeLimit,
-		Users:          users,
-		WireGuardPeers: wgPeers,
+		InboundTag:         req.InboundTag,
+		NodeLimit:          req.NodeLimit,
+		InboundSharedLimit: req.InboundSharedLimit,
+		Users:              users,
+		WireGuardPeers:     wgPeers,
 	}
 	var runtimeLimiter *limiter.Limiter
 	if err := limiter.PersistAndApplyInboundSnapshot(snapshot, func() error {
@@ -7364,7 +7367,7 @@ func (h *ManageHandler) HandleLimiter(w http.ResponseWriter, r *http.Request) {
 		if runtimeLimiter == nil {
 			return errors.New("limiter not available")
 		}
-		runtimeLimiter.SyncInboundLimiter(req.InboundTag, req.NodeLimit, users, wgPeers...)
+		runtimeLimiter.SyncInboundLimiterWithSharedLimit(req.InboundTag, req.NodeLimit, req.InboundSharedLimit, users, wgPeers...)
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Persist limiter state: %v", err))

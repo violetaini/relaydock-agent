@@ -226,3 +226,64 @@ func TestResolveInboundUserKeepsExistingUser(t *testing.T) {
 		t.Fatalf("user=%+v", user)
 	}
 }
+
+func TestGetLinkAppliesSharedInboundLimitToAnonymousTraffic(t *testing.T) {
+	l := limiter.New()
+	const tag = "forward-42-hop-0"
+	l.AddInboundLimiterWithSharedLimit(tag, 1<<20, true, nil)
+	d := &Dispatcher{Limiter: l}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{
+		Tag:    tag,
+		Source: net.TCPDestination(net.ParseAddress("192.0.2.1"), 12345),
+	})
+
+	inbound, outbound, err := d.getLink(ctx)
+	if err != nil {
+		t.Fatalf("getLink: %v", err)
+	}
+	if _, ok := inbound.Writer.(*limiter.RateWriter); !ok {
+		t.Fatalf("anonymous uplink writer type=%T", inbound.Writer)
+	}
+	if _, ok := outbound.Writer.(*limiter.RateWriter); !ok {
+		t.Fatalf("anonymous downlink writer type=%T", outbound.Writer)
+	}
+}
+
+func TestDispatchLinkAppliesSharedInboundLimitToAnonymousTraffic(t *testing.T) {
+	l := limiter.New()
+	const tag = "forward-42-hop-0"
+	l.AddInboundLimiterWithSharedLimit(tag, 1<<20, true, nil)
+	d := &Dispatcher{Limiter: l}
+	link := &transport.Link{Reader: &dispatcherTestReader{}, Writer: &dispatcherTestWriter{}}
+
+	d.limitAnonymousDispatchLink(tag, link)
+
+	if _, ok := link.Reader.(*limiter.RateReader); !ok {
+		t.Fatalf("anonymous DispatchLink reader type=%T", link.Reader)
+	}
+	if _, ok := link.Writer.(*limiter.RateWriter); !ok {
+		t.Fatalf("anonymous DispatchLink writer type=%T", link.Writer)
+	}
+}
+
+func TestAnonymousInboundRequiresExplicitSharedLimitOptIn(t *testing.T) {
+	l := limiter.New()
+	const tag = "ordinary-dokodemo"
+	l.AddInboundLimiter(tag, 1<<20, nil)
+	d := &Dispatcher{Limiter: l}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{
+		Tag:    tag,
+		Source: net.TCPDestination(net.ParseAddress("192.0.2.1"), 12345),
+	})
+
+	inbound, outbound, err := d.getLink(ctx)
+	if err != nil {
+		t.Fatalf("getLink: %v", err)
+	}
+	if _, ok := inbound.Writer.(*limiter.RateWriter); ok {
+		t.Fatal("legacy anonymous inbound was limited without explicit opt-in")
+	}
+	if _, ok := outbound.Writer.(*limiter.RateWriter); ok {
+		t.Fatal("legacy anonymous inbound was limited without explicit opt-in")
+	}
+}

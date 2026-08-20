@@ -17,13 +17,14 @@ const (
 	persistentMarkerVersion   = 1
 )
 
-// PersistentInboundSnapshot is the minimum limiter state that must exist
-// before a durable WireGuard peer is allowed to accept traffic after restart.
+// PersistentInboundSnapshot is the limiter state restored before embedded Xray
+// starts. It covers per-user/WireGuard policy and anonymous forwarding limits.
 type PersistentInboundSnapshot struct {
-	InboundTag     string              `json:"inbound_tag"`
-	NodeLimit      uint64              `json:"node_limit,omitempty"`
-	Users          []UserInfo          `json:"users"`
-	WireGuardPeers []WireGuardPeerUser `json:"wireguard_peers"`
+	InboundTag         string              `json:"inbound_tag"`
+	NodeLimit          uint64              `json:"node_limit,omitempty"`
+	InboundSharedLimit bool                `json:"inbound_shared_limit,omitempty"`
+	Users              []UserInfo          `json:"users"`
+	WireGuardPeers     []WireGuardPeerUser `json:"wireguard_peers"`
 }
 
 type persistentSnapshotFile struct {

@@ -706,13 +706,14 @@ func (c *Client) authenticate(conn *websocket.Conn) error {
 
 func advertisedCapabilities(rpcAvailable, agentUninstallV2Supported, wireGuardPeerUsersSupported bool) map[string]bool {
 	return map[string]bool{
-		"rpc":                                    rpcAvailable,
-		"stream":                                 rpcAvailable,
-		constants.CapabilityAgentUninstallV2:     agentUninstallV2Supported,
-		constants.CapabilityXrayVersionSelectV1:  true,
-		constants.CapabilityXrayAuthorizationV2:  true,
-		constants.CapabilityWireGuardPeerUsersV1: wireGuardPeerUsersSupported,
-		constants.CapabilityLimiterDeniedV1:      true,
+		"rpc":                                      rpcAvailable,
+		"stream":                                   rpcAvailable,
+		constants.CapabilityAgentUninstallV2:       agentUninstallV2Supported,
+		constants.CapabilityXrayVersionSelectV1:    true,
+		constants.CapabilityXrayAuthorizationV2:    true,
+		constants.CapabilityWireGuardPeerUsersV1:   wireGuardPeerUsersSupported,
+		constants.CapabilityLimiterDeniedV1:        true,
+		constants.CapabilityForwardingSpeedLimitV1: wireGuardPeerUsersSupported,
 	}
 }
 
@@ -1941,11 +1942,12 @@ type WSDomainLatencyProbePayload struct {
 
 // WSLimiterConfigPayload 是主控端下发的限速配置。
 type WSLimiterConfigPayload struct {
-	InboundTag     string                        `json:"inbound_tag"`
-	NodeLimit      uint64                        `json:"node_limit"`
-	Users          []WSUserLimitInfo             `json:"users"`
-	WireGuardPeers []WSWireGuardPeerUser         `json:"wireguard_peers,omitempty"`
-	AutoSpeedRules []embedded.AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
+	InboundTag         string                        `json:"inbound_tag"`
+	NodeLimit          uint64                        `json:"node_limit"`
+	InboundSharedLimit bool                          `json:"inbound_shared_limit,omitempty"`
+	Users              []WSUserLimitInfo             `json:"users"`
+	WireGuardPeers     []WSWireGuardPeerUser         `json:"wireguard_peers,omitempty"`
+	AutoSpeedRules     []embedded.AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 }
 
 // WSUserLimitInfo 是单个用户的限速和连接数配置。
@@ -2206,10 +2208,11 @@ func (c *Client) handleLimiterConfig(payload WSLimiterConfigPayload) {
 		}
 	}
 	snapshot := limiter.PersistentInboundSnapshot{
-		InboundTag:     payload.InboundTag,
-		NodeLimit:      payload.NodeLimit,
-		Users:          users,
-		WireGuardPeers: wgPeers,
+		InboundTag:         payload.InboundTag,
+		NodeLimit:          payload.NodeLimit,
+		InboundSharedLimit: payload.InboundSharedLimit,
+		Users:              users,
+		WireGuardPeers:     wgPeers,
 	}
 	var runtimeLimiter *limiter.Limiter
 	var apply func() error
@@ -2219,7 +2222,7 @@ func (c *Client) handleLimiterConfig(payload WSLimiterConfigPayload) {
 			if runtimeLimiter == nil {
 				return fmt.Errorf("embedded limiter is not available")
 			}
-			runtimeLimiter.SyncInboundLimiter(payload.InboundTag, payload.NodeLimit, users, wgPeers...)
+			runtimeLimiter.SyncInboundLimiterWithSharedLimit(payload.InboundTag, payload.NodeLimit, payload.InboundSharedLimit, users, wgPeers...)
 			return nil
 		}
 	}
@@ -2246,8 +2249,8 @@ func (c *Client) handleLimiterConfig(payload WSLimiterConfigPayload) {
 	for _, u := range users {
 		userSpeeds = append(userSpeeds, fmt.Sprintf("%s=%dB/s", u.Email, u.SpeedLimit))
 	}
-	log.Printf("[Agent] Updated limiter for inbound %s: %d users, node_limit=%d, per-user=[%s]",
-		payload.InboundTag, len(users), payload.NodeLimit, strings.Join(userSpeeds, ","))
+	log.Printf("[Agent] Updated limiter for inbound %s: %d users, node_limit=%d, inbound_shared_limit=%v, per-user=[%s]",
+		payload.InboundTag, len(users), payload.NodeLimit, payload.InboundSharedLimit, strings.Join(userSpeeds, ","))
 }
 
 // 采集所有 inbound 的在线设备信息。

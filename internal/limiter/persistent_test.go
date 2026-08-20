@@ -21,8 +21,9 @@ func configurePersistentTestPath(t *testing.T) string {
 
 func persistentTestSnapshot() PersistentInboundSnapshot {
 	return PersistentInboundSnapshot{
-		InboundTag: "wg-inbound",
-		NodeLimit:  1024,
+		InboundTag:         "wg-inbound",
+		NodeLimit:          1024,
+		InboundSharedLimit: true,
 		Users: []UserInfo{
 			{UID: 7, Email: "alice@example.com", SpeedLimit: 512, DeviceLimit: 2, ConnGroup: "alice|node"},
 			{UID: 0, Email: "probe@relaydock.internal", ConnGroup: "wireguard-probe|1"},

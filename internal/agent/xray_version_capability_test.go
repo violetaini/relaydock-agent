@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
 	"github.com/violetaini/relaydock-agent/internal/config"
 	"github.com/violetaini/relaydock-agent/internal/constants"
+	"github.com/violetaini/relaydock-agent/internal/limiter"
 )
 
 func TestAdvertisedCapabilitiesIncludeXrayVersionSelection(t *testing.T) {
@@ -28,6 +30,9 @@ func TestAdvertisedCapabilitiesIncludeXrayVersionSelection(t *testing.T) {
 			}
 			if !capabilities[constants.CapabilityLimiterDeniedV1] {
 				t.Fatalf("explicit limiter deny capability missing: %v", capabilities)
+			}
+			if got := capabilities[constants.CapabilityForwardingSpeedLimitV1]; got != embedded {
+				t.Fatalf("embedded=%v forwarding speed capability=%v capabilities=%v", embedded, got, capabilities)
 			}
 		}
 	}
@@ -78,6 +83,9 @@ func TestHTTPTrafficAdvertisesXrayAuthorizationV2(t *testing.T) {
 			if !got[constants.CapabilityLimiterDeniedV1] {
 				t.Fatalf("explicit limiter deny capability missing: %v", got)
 			}
+			if actual := got[constants.CapabilityForwardingSpeedLimitV1]; actual != test.wantWireGuard {
+				t.Fatalf("forwarding speed capability=%v want %v; capabilities=%v", actual, test.wantWireGuard, got)
+			}
 		})
 	}
 }
@@ -112,6 +120,9 @@ func TestHTTPHeartbeatAdvertisesLimiterDeniedV1(t *testing.T) {
 	got := <-capabilities
 	if !got[constants.CapabilityLimiterDeniedV1] {
 		t.Fatalf("heartbeat capabilities=%v", got)
+	}
+	if !got[constants.CapabilityForwardingSpeedLimitV1] {
+		t.Fatalf("heartbeat forwarding speed capability missing: %v", got)
 	}
 }
 
@@ -171,5 +182,45 @@ func TestWSHeartbeatAdvertisesLimiterDeniedV1(t *testing.T) {
 	}
 	if !got.capabilities[constants.CapabilityLimiterDeniedV1] {
 		t.Fatalf("heartbeat capabilities=%v", got.capabilities)
+	}
+	if !got.capabilities[constants.CapabilityForwardingSpeedLimitV1] {
+		t.Fatalf("WS heartbeat forwarding speed capability missing: %v", got.capabilities)
+	}
+}
+
+func TestWSLimiterConfigPayloadDecodesInboundSharedLimit(t *testing.T) {
+	var payload WSLimiterConfigPayload
+	if err := json.Unmarshal([]byte(`{
+		"inbound_tag":"forward-42-hop-0",
+		"node_limit":1250000,
+		"inbound_shared_limit":true,
+		"users":[]
+	}`), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.InboundTag != "forward-42-hop-0" || payload.NodeLimit != 1250000 || !payload.InboundSharedLimit {
+		t.Fatalf("payload=%+v", payload)
+	}
+}
+
+func TestWSLimiterConfigPersistsInboundSharedLimit(t *testing.T) {
+	limiter.ConfigurePersistentSnapshotPath(filepath.Join(t.TempDir(), "limiter-state.json"))
+	t.Cleanup(func() { limiter.ConfigurePersistentSnapshotPath("") })
+
+	client := NewClient(&config.Config{XrayMode: "embedded"})
+	client.licenseStatus = &LicenseStatus{Plan: &LicensePlanInfo{Features: []string{"limiter"}}}
+	client.handleLimiterConfig(WSLimiterConfigPayload{
+		InboundTag:         "forward-42-hop-0",
+		NodeLimit:          1250000,
+		InboundSharedLimit: true,
+	})
+
+	snapshots, err := limiter.LoadPersistentInboundSnapshots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].InboundTag != "forward-42-hop-0" ||
+		snapshots[0].NodeLimit != 1250000 || !snapshots[0].InboundSharedLimit {
+		t.Fatalf("snapshots=%+v", snapshots)
 	}
 }

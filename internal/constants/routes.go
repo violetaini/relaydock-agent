@@ -66,11 +66,12 @@ const (
 )
 
 const (
-	CapabilityAgentUninstallV2     = "agent_uninstall_v2"
-	CapabilityXrayVersionSelectV1  = "xray_version_select_v1"
-	CapabilityXrayAuthorizationV2  = "xray_authorization_v2"
-	CapabilityWireGuardPeerUsersV1 = "wireguard_peer_users_v1"
-	CapabilityLimiterDeniedV1      = "limiter_denied_v1"
+	CapabilityAgentUninstallV2       = "agent_uninstall_v2"
+	CapabilityXrayVersionSelectV1    = "xray_version_select_v1"
+	CapabilityXrayAuthorizationV2    = "xray_authorization_v2"
+	CapabilityWireGuardPeerUsersV1   = "wireguard_peer_users_v1"
+	CapabilityLimiterDeniedV1        = "limiter_denied_v1"
+	CapabilityForwardingSpeedLimitV1 = "forwarding_speed_limit_v1"
 )
 
 const (
