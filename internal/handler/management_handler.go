@@ -58,6 +58,7 @@ cleanup() {
 }
 trap cleanup EXIT
 curl -fsSL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o "$installer_path"
+sed -i 's|XTLS/Xray-core|chitanda-project/chitanda|g' "$installer_path"
 if [ -n "${XRAY_TARGET_VERSION:-}" ]; then
     bash "$installer_path" install --version "$XRAY_TARGET_VERSION" --force
 else

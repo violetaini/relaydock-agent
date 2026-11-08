@@ -67,3 +67,7 @@ sign-local.sh
 !internal/handler/wireguard_management_test.go
 !internal/limiter/persistent_test.go
 !internal/limiter/wireguard_test.go
+
+agent_amd64
+
+bin/

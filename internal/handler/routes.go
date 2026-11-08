@@ -48,6 +48,7 @@ func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandl
 	mux.HandleFunc(constants.PathChildUpdateMasterURL, manageHandler.HandleUpdateMasterURL)
 	mux.HandleFunc(constants.PathChildAgentUninstallV2, manageHandler.HandleAgentUninstallV2)
 	mux.HandleFunc(constants.PathChildTakeoverXray, manageHandler.HandleTakeoverExternalXray)
+	mux.HandleFunc(constants.PathChildXUIDetect, manageHandler.HandleXUIDetect)
 
 	// SSE 流式安装和卸载接口
 	mux.HandleFunc(constants.PathChildXrayInstallStream, manageHandler.HandleXrayInstallStream)

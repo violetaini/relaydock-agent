@@ -48,6 +48,8 @@ const (
 	PathChildUpdateMasterURL  = "/api/child/agent/update-master-url"
 	PathChildAgentUninstallV2 = "/api/child/agent/uninstall-v2"
 	PathChildTakeoverXray     = "/api/child/external-xray/takeover"
+	// PathChildXUIDetect 只读检测本机是否存在 3x-ui 实例及其运行状态与端口，绝不修改或停止任何进程
+	PathChildXUIDetect        = "/api/child/xui/detect"
 	// PathChildBatchApply 一次性提交多个 inbound add-client + routing rule add_user 改动,
 	// 在 inboundsMu 锁内单次读 config + 单次写盘 + per-inbound runtime apply 完成。
 	// 用于套餐绑用户场景:同台 server 上多个 routed 节点的所有改动合并成 1 次 round-trip。

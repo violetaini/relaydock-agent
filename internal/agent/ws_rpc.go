@@ -148,7 +148,15 @@ func (c *Client) handleRPCCallBuffer(conn *websocket.Conn, p WSRPCCallPayload) {
 	}
 
 	reply.Status = w.status
-	reply.Body = json.RawMessage(w.body.Bytes())
+	raw := w.body.Bytes()
+	if len(raw) == 0 {
+		reply.Body = json.RawMessage("null")
+	} else if json.Valid(raw) {
+		reply.Body = json.RawMessage(raw)
+	} else {
+		encoded, _ := json.Marshal(string(raw))
+		reply.Body = json.RawMessage(encoded)
+	}
 }
 
 // sendRPCReply 用 writeEncrypted 把响应回 master。WS 已断 → 静默丢弃,master 那边会 timeout fallback HTTP。
