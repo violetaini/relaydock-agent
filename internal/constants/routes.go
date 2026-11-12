@@ -32,6 +32,7 @@ const (
 	PathChildInbounds   = "/api/child/inbounds"
 	PathChildOutbounds  = "/api/child/outbounds"
 	PathChildRouting    = "/api/child/routing"
+	PathChildPortsCheck = "/api/child/ports/check"
 	PathChildScan       = "/api/child/scan"
 	PathChildCertDeploy = "/api/child/cert/deploy"
 	PathChildNginxSetup = "/api/child/nginx/setup-ssl"

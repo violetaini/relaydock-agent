@@ -555,6 +555,9 @@ func main() {
 		}
 	}
 	log.Printf("[Main] HTTP server listening on :%s", cfg.ListenPort)
+	if parsedListenPort, err := strconv.Atoi(strings.TrimSpace(cfg.ListenPort)); err == nil && parsedListenPort > 0 {
+		manageHandler.SetListenPort(parsedListenPort)
+	}
 	// gate 接管 Serve;初始保持监听(默认行为)。开启端口隐身后,WS 连上会(延迟)关闭监听、
 	// WS 断开立即重开。
 	gate := newListenGate(server, httpLn)
@@ -709,6 +712,82 @@ var geoMirrorTemplates = []string{
 	"https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/%s",
 }
 
+func defaultGeoSourceGlobs() []string {
+	return []string{
+		"/opt/backup_xui*/x-ui/bin",
+		"/usr/local/x-ui/bin",
+		"/opt/3x-ui/bin",
+		"/usr/local/share/xray",
+		"/usr/local/bin",
+	}
+}
+
+// seedLocalGeoData copies existing geoip*.dat and geosite*.dat files from legacy
+// x-ui/xray directories into dir when missing, preserving ext:geosite_IR.dat etc.
+func seedLocalGeoData(dir string, sourceGlobs []string) {
+	if strings.TrimSpace(dir) == "" {
+		return
+	}
+	for _, dirGlob := range sourceGlobs {
+		dirs, err := filepath.Glob(dirGlob)
+		if err != nil {
+			continue
+		}
+		sort.Strings(dirs)
+		for _, srcDir := range dirs {
+			if srcDir == dir {
+				continue
+			}
+			for _, filePat := range []string{"geoip*.dat", "geosite*.dat"} {
+				matches, err := filepath.Glob(filepath.Join(srcDir, filePat))
+				if err != nil {
+					continue
+				}
+				sort.Strings(matches)
+				for _, src := range matches {
+					info, err := os.Stat(src)
+					if err != nil || info.IsDir() || info.Size() == 0 {
+						continue
+					}
+					dest := filepath.Join(dir, filepath.Base(src))
+					if _, err := os.Stat(dest); err == nil {
+						continue
+					}
+					if err := copyGeoFile(src, dest); err != nil {
+						log.Printf("[Main] Failed to seed %s from %s: %v", filepath.Base(src), src, err)
+						continue
+					}
+					log.Printf("[Main] Seeded %s from %s", filepath.Base(src), src)
+				}
+			}
+		}
+	}
+}
+
+func copyGeoFile(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp := dest + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dest)
+}
+
 func ensureGeoData() {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -716,6 +795,8 @@ func ensureGeoData() {
 		return
 	}
 	dir := filepath.Dir(exePath)
+
+	seedLocalGeoData(dir, defaultGeoSourceGlobs())
 
 	for _, name := range []string{"geoip.dat", "geosite.dat"} {
 		dest := filepath.Join(dir, name)

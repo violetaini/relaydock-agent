@@ -33,6 +33,7 @@ func RegisterChildRoutes(mux *http.ServeMux, apiHandler *APIHandler, manageHandl
 	mux.HandleFunc(constants.PathChildInbounds, manageHandler.HandleInbounds)
 	mux.HandleFunc(constants.PathChildOutbounds, manageHandler.HandleOutbounds)
 	mux.HandleFunc(constants.PathChildRouting, manageHandler.HandleRouting)
+	mux.HandleFunc(constants.PathChildPortsCheck, manageHandler.HandleCheckPort)
 	mux.HandleFunc(constants.PathChildBatchApply, manageHandler.HandleBatchApply)
 	mux.HandleFunc(constants.PathChildScan, manageHandler.HandleScan)
 	mux.HandleFunc(constants.PathChildCertDeploy, manageHandler.HandleCertDeploy)

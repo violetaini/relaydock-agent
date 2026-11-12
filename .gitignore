@@ -77,3 +77,5 @@ bin/
 !third_party/xray-core/**/*_test.go
 !internal/embedded/chitanda_test.go
 !internal/agentfirewall/inbounds_test.go
+!internal/handler/port_check_test.go
+!cmd/relaydock-agent/geodata_test.go

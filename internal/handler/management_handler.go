@@ -185,6 +185,9 @@ type ManageHandler struct {
 	// without spawning the replacement script.
 	agentUpgradeReleaseResolver func(context.Context, string) (string, error)
 	externalXrayLookPath        func(string) (string, error)
+	listenPort                  int
+	portAvailabilityProbe       func(port int, networks []string) (bool, string, string)
+	xrayRunningProbe            func() bool
 }
 
 // SetLogPath 注入 agent 自身日志文件路径,供 HandleGetLogs 读取。
@@ -192,6 +195,9 @@ func (h *ManageHandler) SetLogPath(p string) { h.logPath = p }
 
 // SetXrayAccessLogPath 注入内嵌 xray 的 access log 文件路径。
 func (h *ManageHandler) SetXrayAccessLogPath(p string) { h.xrayAccessLogPath = p }
+
+// SetListenPort records the resolved agent HTTP listener port for port conflict checks.
+func (h *ManageHandler) SetListenPort(port int) { h.listenPort = port }
 
 // 创建管理处理器。
 func NewManageHandler(configToken, restartMethod, restartCommand string) *ManageHandler {
