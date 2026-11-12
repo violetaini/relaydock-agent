@@ -2154,10 +2154,19 @@ func runCmd(name string, args ...string) error {
 func (c *Client) handleTokenUpdate(payload WSTokenUpdatePayload) {
 	log.Printf("[Agent] Received token update from master, new token expires at %s", payload.ExpiresAt.Format(time.RFC3339))
 
-	// 更新内存中的 token
-	c.config.Token = payload.ServerToken
+	token := strings.TrimSpace(payload.ServerToken)
+	if token == "" {
+		log.Printf("[Agent] Ignoring empty token update from master")
+		return
+	}
 
-	log.Printf("[Agent] Token updated successfully in memory")
+	// 更新内存中的 token，并持久化到 config.yaml，避免后续重启/切换 xray_mode 回退旧 token 导致 WS 鉴权失败。
+	c.config.Token = token
+	if err := c.persistConfigField("token", strconv.Quote(token)); err != nil {
+		log.Printf("[Agent] Failed to persist updated token to config file: %v", err)
+	}
+
+	log.Printf("[Agent] Token updated successfully")
 }
 
 // 处理主控端下发的限速配置。
