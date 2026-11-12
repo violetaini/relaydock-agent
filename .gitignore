@@ -72,3 +72,8 @@ sign-local.sh
 agent_amd64
 
 bin/
+!third_party/xray-core/
+!third_party/xray-core/**
+!third_party/xray-core/**/*_test.go
+!internal/embedded/chitanda_test.go
+!internal/agentfirewall/inbounds_test.go

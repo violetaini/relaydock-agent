@@ -123,6 +123,8 @@ func inboundTransports(inbound map[string]interface{}) []string {
 	settings, _ := inbound["settings"].(map[string]interface{})
 
 	switch protocol {
+	case "chitanda":
+		return []string{"tcp", "udp"}
 	case "wireguard", "hysteria", "hysteria2", "hy2":
 		return []string{"udp"}
 	case "dokodemo-door", "tunnel":
