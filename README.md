@@ -15,6 +15,14 @@ RelayDock 受管服务器 Agent
 
 RelayDock Agent 部署在受管服务器上，与 RelayDock 主控保持连接，执行节点配置、服务管理、流量采集和系统维护任务。它不是独立面板，正常情况下应由 RelayDock 管理界面生成安装命令并完成注册。
 
+> [!WARNING]
+> ### ⚠️ 免责声明 (Disclaimer)
+> 本项目（RelayDock Agent）及相关资源仅供**学术研究、网络架构验证、合规运维与个人技术探索**之用。
+> 
+> 1. **合规使用义务**：使用者在部署本 Agent 时，必须严格遵守自身所在国家/地区以及受管服务器物理/网络托管所在地的所有法律法规、行业规范及网络安全合规要求。
+> 2. **禁止非法用途**：严禁将本 Agent 用于任何危害网络安全、侵犯他人权益、未授权访问或渗透计算机系统、从事非法网络代理运营等违法犯罪行为。
+> 3. **无保证与责任免除**：本软件按「现状」（AS IS）提供，开发者与维护团队不对因使用、误用或滥用本软件造成的任何直接或间接损失、法律纠纷或行政处罚承担任何连带责任。
+
 > [!IMPORTANT]
 > Agent 可以管理 Xray、Nginx、证书和防火墙。请只把它部署到自己拥有或获准管理的服务器，并在接管已有服务前完成备份。
 
@@ -118,6 +126,14 @@ go build -trimpath -o relaydock-agent ./cmd/relaydock-agent
 - [relaydock](https://github.com/violetaini/relaydock)：主控、API、安装器和内嵌管理界面
 - [relaydock-frontend](https://github.com/violetaini/relaydock-frontend)：React / TypeScript 前端源码
 - [relaydock-agent](https://github.com/violetaini/relaydock-agent)：受管服务器 Agent 源码与签名发布
+
+## 免责声明与使用条款 (Disclaimer & Terms of Use)
+
+凡获取、下载、安装、运行或使用 RelayDock Agent 的使用者，均被视为已仔细阅读并完全同意：
+
+1. **学术研究与合规管理目的**：本 Agent 仅作为服务器状态监控、流量采集与自动化配置下发的研究与运维工具，严禁用于任何非法侵入、未授权代理或违反当地法律法规的活动。
+2. **守法义务与自主负责**：使用者须自行确保其在受管服务器上的操作具备合法权限，并自行承担因使用本软件引发的一切系统风险、服务中断或法律合规责任。
+3. **无保证声明**：本软件按「现状」（AS IS）提供，不附带任何明示或暗示的担保。
 
 ## 许可与致谢
 
