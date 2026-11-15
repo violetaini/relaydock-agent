@@ -47,6 +47,10 @@ jobs:
           go mod verify
           go list -m -f 'Official Xray module: {{.Path}} {{.Version}}' github.com/xtls/xray-core
 
+      - name: Test upgrade path and downgrade guards
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go test ./internal/handler -run 'AgentUpgrade' -count=1
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -162,6 +166,7 @@ jobs:
         with:
           draft: false
           prerelease: false
+          body_path: docs/release-notes/${{ github.ref_name }}.md
           # release.sh 已用自定义 changelog 创建 Release，这里只上传二进制，不覆盖说明
           generate_release_notes: false
           files: |

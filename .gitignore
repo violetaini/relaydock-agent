@@ -79,3 +79,4 @@ bin/
 !internal/agentfirewall/inbounds_test.go
 !internal/handler/port_check_test.go
 !cmd/relaydock-agent/geodata_test.go
+!internal/handler/agent_upgrade_path_test.go

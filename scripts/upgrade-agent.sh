@@ -19,7 +19,12 @@
 set -euo pipefail
 
 REPO="violetaini/relaydock-agent"
-BIN="/usr/local/bin/relaydock-agent"
+BIN="${RELAYDOCK_AGENT_BIN:-}"
+if [ -z "$BIN" ]; then
+    if command -v relaydock-agent >/dev/null 2>&1; then BIN="$(command -v relaydock-agent)"
+    elif [ -x /opt/relaydock-agent/bin/relaydock-agent ]; then BIN=/opt/relaydock-agent/bin/relaydock-agent
+    else BIN=/usr/local/bin/relaydock-agent; fi
+fi
 TARGET="${1:-latest}"
 
 err() { echo "[ERROR] $*" >&2; exit 1; }
@@ -168,7 +173,11 @@ fi
 
 # 6. 原子替换(避免 "text file busy" — 旧进程占着 inode 不能直接 cp 覆盖)
 chmod +x "$TMP"
-mv -f "$TMP" "$BIN"
+STAGED="$(mktemp "$(dirname "$BIN")/.relaydock-agent.new.XXXXXXXX")"
+cp "$TMP" "$STAGED"
+chmod 0755 "$STAGED"
+mv -f -- "$STAGED" "$BIN"
+rm -f "$TMP"
 rm -f "$SIG" "$RELEASE_JSON"
 trap - EXIT
 log "已替换 $BIN"
