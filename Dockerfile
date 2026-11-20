@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # relaydock-agent 源码本体
 WORKDIR /build/relaydock-agent
 COPY go.mod go.sum ./
+COPY third_party ./third_party
 RUN go mod download \
     && go mod verify \
     && go list -m -f 'Official Xray module: {{.Path}} {{.Version}}' github.com/xtls/xray-core
